@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -293,7 +294,10 @@ def _environment_python(prefix: Path) -> Path:
 
 def _resolve_path(checkpoint: Path, reference: str) -> Path:
     path = Path(reference).expanduser()
-    return path if path.is_absolute() else (checkpoint / path).resolve()
+    # Keep the final symlink intact. A checkpoint-local ``runtime/bin/python`` commonly points at a virtual
+    # environment; resolving it to the base interpreter (for example ``/usr/bin/python3.12``) discards that
+    # environment's site-packages when multiprocessing launches the worker.
+    return path if path.is_absolute() else Path(os.path.abspath(checkpoint / path))
 
 
 def _conda_python(reference: str) -> Path:

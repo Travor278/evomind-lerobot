@@ -183,6 +183,31 @@ def test_python_environment_resolves_relative_to_checkpoint(
     }
 
 
+def test_relative_python_environment_preserves_virtualenv_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "pretrained_model"
+    environment = tmp_path / "environments" / "torch271"
+    executable = environment / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    checkpoint.mkdir()
+    (checkpoint / "runtime").symlink_to(environment, target_is_directory=True)
+    save_runtime_manifest(
+        checkpoint,
+        pytorch_manifest(
+            environment=ExecutableEnvironment(kind="python", reference="runtime/bin/python")
+        ),
+    )
+    monkeypatch.setattr(policy_runtime, "current_environment", installed_versions)
+
+    launch = runtime_launch_spec(checkpoint)
+
+    assert launch.python_executable == str(checkpoint / "runtime" / "bin" / "python")
+    assert Path(launch.python_executable).is_symlink() is False
+    assert Path(launch.python_executable).samefile(executable)
+
+
 def test_manifest_inspection_is_resilient_to_missing_and_invalid_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
