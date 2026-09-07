@@ -363,6 +363,7 @@ lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
 evomind-lerobot-serve="evomind_lerobot.cli:main"
+evomind-policy-runtime="evomind_lerobot.policy_runtime:main"
 
 # ---------------- Tool Configurations ----------------
 

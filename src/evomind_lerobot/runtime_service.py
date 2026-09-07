@@ -27,6 +27,14 @@ from evomind_lerobot.device_config import (
 )
 from evomind_lerobot.events import EventBroker, Operation, Phase
 from evomind_lerobot.jobs import HardwareBusyError, JobManager
+from evomind_lerobot.policy_runtime import (
+    RUNTIME_MANIFEST_NAME,
+    PolicyRuntimeManifest,
+    RuntimeLaunchSpec,
+    load_runtime_manifest,
+    runtime_launch_spec,
+    validate_active_runtime,
+)
 from evomind_lerobot.workspace import datasets_inventory, policies_inventory
 
 
@@ -129,6 +137,60 @@ _MESSAGES = {
     ("replay", "stopping"): "正在停止回放",
     ("replay", "completed"): "回放已结束",
 }
+
+_SPAWN_ENVIRONMENT_LOCK = threading.Lock()
+
+
+def _start_process(process: multiprocessing.Process, launch: RuntimeLaunchSpec | None = None) -> None:
+    """Start a spawn process with a checkpoint-selected interpreter and environment."""
+    if launch is None:
+        process.start()
+        return
+    from multiprocessing import spawn
+
+    original_executable = spawn.get_executable()
+    original_directory = Path.cwd()
+    missing = object()
+    previous_environment: dict[str, str | object] = {
+        key: os.environ.get(key, missing) for key in launch.environment_variables
+    }
+    with _SPAWN_ENVIRONMENT_LOCK:
+        try:
+            multiprocessing.set_executable(launch.python_executable)
+            os.environ.update(launch.environment_variables)
+            if launch.working_directory:
+                os.chdir(launch.working_directory)
+            process.start()
+        finally:
+            multiprocessing.set_executable(original_executable)
+            os.chdir(original_directory)
+            for key, value in previous_environment.items():
+                if value is missing:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+
+
+def _policy_runtime_manifest(policy_path: str) -> PolicyRuntimeManifest | None:
+    checkpoint = Path(policy_path)
+    if not (checkpoint / RUNTIME_MANIFEST_NAME).is_file():
+        return None
+    return load_runtime_manifest(checkpoint)
+
+
+def _apply_policy_runtime_settings(policy_config: Any, manifest: PolicyRuntimeManifest | None) -> None:
+    if manifest is None:
+        return
+    settings = manifest.inference
+    for name, value in (
+        ("device", settings.device),
+        ("dtype", settings.precision),
+        ("compile_model", settings.torch_compile.enabled),
+        ("compile_mode", settings.torch_compile.mode),
+        ("attn_implementation", settings.attention_backend),
+    ):
+        if value is not None and hasattr(policy_config, name):
+            setattr(policy_config, name, value)
 
 
 class ProcessRuntimeBridge:
@@ -567,6 +629,7 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
     from lerobot.scripts.lerobot_rollout import rollout
 
     request = RolloutStartRequest.model_validate(payload)
+    manifest = validate_active_runtime(Path(request.policy_path))
     configuration = _configuration()
     inspection = inspect_policy_compatibility(PolicyInspectRequest(policy_path=request.policy_path))
     if not inspection["compatible"]:
@@ -586,6 +649,8 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
     policy_path = _policy_path(request.policy_path)
     policy = PreTrainedConfig.from_pretrained(policy_path)
     policy.pretrained_path = policy_path
+    manifest = manifest or _policy_runtime_manifest(policy_path)
+    _apply_policy_runtime_settings(policy, manifest)
 
     dataset = None
     if request.strategy != "base":
@@ -634,6 +699,12 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         rename_map=inspection["rename_map"],
         display_data=False,
         play_sounds=False,
+        device=manifest.inference.device if manifest else None,
+        use_torch_compile=manifest.inference.torch_compile.enabled if manifest else False,
+        torch_compile_backend=(manifest.inference.torch_compile.backend or "inductor")
+        if manifest
+        else "inductor",
+        torch_compile_mode=(manifest.inference.torch_compile.mode or "default") if manifest else "default",
     )
     if preloaded_policy is None:
         rollout(rollout_config)
@@ -732,6 +803,8 @@ def _run_workflow(
 
 def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     """Load one local policy and keep it on its configured accelerator."""
+    manifest = validate_active_runtime(Path(policy_path))
+
     import torch
 
     from lerobot import policies as _policy_configs  # noqa: F401
@@ -743,6 +816,8 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     register_third_party_plugins()
     policy_config = PreTrainedConfig.from_pretrained(policy_path)
     policy_config.pretrained_path = policy_path
+    manifest = manifest or _policy_runtime_manifest(policy_path)
+    _apply_policy_runtime_settings(policy_config, manifest)
     configured_device = policy_config.device
     device = (
         configured_device
@@ -757,6 +832,17 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
         "policy_type": policy_config.type,
         "device": str(device),
         "allocated_bytes": allocated_bytes,
+        **(
+            {
+                "runtime_environment_kind": manifest.environment.kind,
+                "runtime_environment_reference": manifest.environment.reference,
+                "precision": manifest.inference.precision,
+                "attention_backend": manifest.inference.attention_backend,
+                "torch_compile": manifest.inference.torch_compile.model_dump(mode="json"),
+            }
+            if manifest
+            else {}
+        ),
     }
 
 
@@ -859,6 +945,7 @@ class RuntimeService:
 
     def preload_policy(self, request: PolicyPreloadRequest) -> dict[str, Any]:
         policy_path = require_local_policy(request.policy_path)
+        launch = runtime_launch_spec(Path(policy_path))
         with self._lock:
             if self._operation is not None:
                 raise RuntimeError("请先结束当前运行任务")
@@ -890,7 +977,7 @@ class RuntimeService:
             self._resident_details = None
             self._resident_loading_path = policy_path
         try:
-            process.start()
+            _start_process(process, launch)
         except Exception:
             self._discard_resident(terminate=False)
             raise
@@ -993,6 +1080,9 @@ class RuntimeService:
         collection_task: dict[str, Any] | None,
     ) -> dict[str, Any]:
         payload = request.model_dump()
+        launch: RuntimeLaunchSpec | None = None
+        if operation is Operation.ROLLOUT:
+            launch = runtime_launch_spec(Path(str(payload["policy_path"])))
         with self._lock:
             resident_path = (
                 (self._resident_details or {}).get("policy_path")
@@ -1069,7 +1159,7 @@ class RuntimeService:
             if use_resident:
                 control_queue.put({"kind": "rollout", "payload": payload})
             else:
-                process.start()
+                _start_process(process, launch)
         except Exception:
             self._clear()
             if collection_task is not None and self._collection_store is not None:
