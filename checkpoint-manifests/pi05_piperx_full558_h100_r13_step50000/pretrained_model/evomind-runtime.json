@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "framework": "pytorch",
+  "training": {
+    "source": "validated_inference",
+    "captured_at": "2026-09-07T15:07:24.577930Z",
+    "python": "3.12.13",
+    "cuda": "12.8",
+    "cudnn": "91002",
+    "pytorch": "2.10.0",
+    "jax": null,
+    "jaxlib": null,
+    "transformers": "5.3.0",
+    "triton": "3.6.0"
+  },
+  "environment": {
+    "kind": "python",
+    "reference": "/home/zhaobo/.local/share/evomind-lerobot/envs/studio-torch210-cu128/bin/python",
+    "working_directory": null
+  },
+  "inference": {
+    "device": "cuda:0",
+    "precision": "bfloat16",
+    "attention_backend": "eager",
+    "rollout_backend": "rtc",
+    "torch_compile": {
+      "enabled": false,
+      "mode": null,
+      "backend": null,
+      "dynamic": null
+    },
+    "environment_variables": {}
+  },
+  "benchmarks": [
+    {
+      "captured_at": "2026-09-07T14:50:13Z",
+      "environment_label": "studio-torch210-cu128",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 76.30077066802187,
+      "first_inference_ms": 486.00458400323987,
+      "latency_p50_ms": 232.23160399356857,
+      "latency_p95_ms": 235.43240239378065,
+      "peak_memory_bytes": 16909882880,
+      "notes": null,
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T14:50:13Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91002",
+        "pytorch": "2.10.0",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.3.0",
+        "triton": "3.6.0"
+      },
+      "inference": null,
+      "samples_ms": [
+        232.23160399356857,
+        235.59191200183704,
+        228.43043704051524,
+        231.15670500556007,
+        234.79436396155506
+      ]
+    },
+    {
+      "captured_at": "2026-09-07T14:52:11Z",
+      "environment_label": "evomind-torch211-cu128",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 71.59356646402739,
+      "first_inference_ms": 505.67044696072116,
+      "latency_p50_ms": 228.7438830244355,
+      "latency_p95_ms": 232.78798679821193,
+      "peak_memory_bytes": 16909883392,
+      "notes": null,
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T14:52:11Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91900",
+        "pytorch": "2.11.0+cu128",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.5.4",
+        "triton": "3.6.0"
+      },
+      "inference": null,
+      "samples_ms": [
+        227.83007402904332,
+        228.8803739938885,
+        233.7648899992928,
+        225.87444901000708,
+        228.7438830244355
+      ]
+    },
+    {
+      "captured_at": "2026-09-07T14:56:28Z",
+      "environment_label": "studio-torch210-cu128-bf16",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 69.80443687498337,
+      "first_inference_ms": 441.9318739674054,
+      "latency_p50_ms": 149.5208129636012,
+      "latency_p95_ms": 150.17788460245356,
+      "peak_memory_bytes": 9532764672,
+      "notes": null,
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T14:56:28Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91002",
+        "pytorch": "2.10.0",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.3.0",
+        "triton": "3.6.0"
+      },
+      "inference": {
+        "device": "cuda:0",
+        "precision": "bfloat16",
+        "attention_backend": "eager",
+        "rollout_backend": "sync",
+        "torch_compile": {
+          "enabled": false,
+          "mode": null,
+          "backend": null,
+          "dynamic": null
+        },
+        "environment_variables": {}
+      },
+      "samples_ms": [
+        149.9399910098873,
+        149.5208129636012,
+        150.23735800059512,
+        149.18120199581608,
+        149.0469459677115
+      ]
+    },
+    {
+      "captured_at": "2026-09-07T14:58:33Z",
+      "environment_label": "evomind-torch211-cu128-bf16",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 69.53727331495611,
+      "first_inference_ms": 448.2613030122593,
+      "latency_p50_ms": 148.699255019892,
+      "latency_p95_ms": 150.81732937833294,
+      "peak_memory_bytes": 9532765184,
+      "notes": null,
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T14:58:33Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91900",
+        "pytorch": "2.11.0+cu128",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.5.4",
+        "triton": "3.6.0"
+      },
+      "inference": {
+        "device": "cuda:0",
+        "precision": "bfloat16",
+        "attention_backend": "eager",
+        "rollout_backend": "sync",
+        "torch_compile": {
+          "enabled": false,
+          "mode": null,
+          "backend": null,
+          "dynamic": null
+        },
+        "environment_variables": {}
+      },
+      "samples_ms": [
+        147.69925002474338,
+        148.3289049938321,
+        149.54490697709844,
+        148.699255019892,
+        151.13543497864157
+      ]
+    },
+    {
+      "captured_at": "2026-09-07T15:04:01Z",
+      "environment_label": "studio-torch210-cu128-bf16-compile",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 1,
+      "measured_runs": 3,
+      "load_time_s": 71.21675713098375,
+      "first_inference_ms": 228192.94484402053,
+      "latency_p50_ms": 75.31933899736032,
+      "latency_p95_ms": 75.62865815125406,
+      "peak_memory_bytes": 9580855808,
+      "notes": null,
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T15:04:01Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91002",
+        "pytorch": "2.10.0",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.3.0",
+        "triton": "3.6.0"
+      },
+      "inference": {
+        "device": "cuda:0",
+        "precision": "bfloat16",
+        "attention_backend": "eager",
+        "rollout_backend": "sync",
+        "torch_compile": {
+          "enabled": true,
+          "mode": "max-autotune",
+          "backend": "inductor",
+          "dynamic": null
+        },
+        "environment_variables": {}
+      },
+      "samples_ms": [
+        75.66302694613114,
+        75.12340700486675,
+        75.31933899736032
+      ]
+    }
+  ]
+}
