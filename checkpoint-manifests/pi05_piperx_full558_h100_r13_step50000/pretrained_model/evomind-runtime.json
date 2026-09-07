@@ -3,14 +3,14 @@
   "framework": "pytorch",
   "training": {
     "source": "validated_inference",
-    "captured_at": "2026-09-07T15:07:24.577930Z",
+    "captured_at": "2026-09-07T18:55:36Z",
     "python": "3.12.13",
     "cuda": "12.8",
-    "cudnn": "91002",
-    "pytorch": "2.10.0",
+    "cudnn": "91900",
+    "pytorch": "2.11.0+cu128",
     "jax": null,
     "jaxlib": null,
-    "transformers": "5.3.0",
+    "transformers": "5.5.4",
     "triton": "3.6.0",
     "precision": "float32",
     "use_amp": false,
@@ -21,7 +21,7 @@
   },
   "environment": {
     "kind": "python",
-    "reference": "/home/zhaobo/.local/share/evomind-lerobot/envs/studio-torch210-cu128/bin/python",
+    "reference": "/home/zhaobo/.local/share/evomind-lerobot/envs/evomind-torch211-cu128/bin/python",
     "working_directory": null
   },
   "inference": {
@@ -294,6 +294,59 @@
       "versions": null,
       "inference": null,
       "samples_ms": []
+    },
+    {
+      "captured_at": "2026-09-07T18:55:36Z",
+      "environment_label": "evomind-torch211-cu128-meta-assign",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 4.52315126999747,
+      "first_inference_ms": 437.64467095024884,
+      "latency_p50_ms": 229.22942001605406,
+      "latency_p95_ms": 232.52455316251144,
+      "peak_memory_bytes": 16894675456,
+      "notes": "Meta initialization; direct safetensors assignment; selected after matching the validated 4090-a runtime",
+      "versions": {
+        "source": "validated_inference",
+        "captured_at": "2026-09-07T18:55:36Z",
+        "python": "3.12.13",
+        "cuda": "12.8",
+        "cudnn": "91900",
+        "pytorch": "2.11.0+cu128",
+        "jax": null,
+        "jaxlib": null,
+        "transformers": "5.5.4",
+        "triton": "3.6.0",
+        "precision": "float32",
+        "use_amp": false,
+        "attention_backend": "eager",
+        "torch_compile": false,
+        "torch_compile_mode": null,
+        "settings_source": "validated_inference"
+      },
+      "inference": {
+        "device": "cuda:0",
+        "precision": "float32",
+        "attention_backend": "eager",
+        "rollout_backend": "rtc",
+        "torch_compile": {
+          "enabled": false,
+          "mode": null,
+          "backend": null,
+          "dynamic": null
+        },
+        "environment_variables": {}
+      },
+      "samples_ms": [
+        228.77420904114842,
+        233.07893495075405,
+        230.307026009541,
+        226.75811097724363,
+        229.22942001605406
+      ]
     }
   ]
 }

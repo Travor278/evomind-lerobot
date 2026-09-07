@@ -1068,7 +1068,7 @@ function SerialCalibrationPrototype({ configuration, onConfigurationChange }: { 
 function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, statusSlot, onWorkspaceRefresh }: { kind: 'teleoperation' | 'recording' | 'inference' | 'replay'; configuration: DeviceConfiguration; workspace: WorkspaceInventory; runtimeEvent: RuntimeEvent | null; storage: StorageInfo | null; statusSlot: HTMLDivElement | null; onWorkspaceRefresh: () => void }) {
   const followers = [...configuration.serial_bindings, ...configuration.can_bindings].filter((binding) => binding.kind === 'robot');
   const [fps, setFps] = useState(30);
-  const [task, setTask] = useState('Insert the copper screw into the black sleeve');
+  const [task, setTask] = useState('Insert the copper screw into the black sleeve.');
   const [taskId, setTaskId] = useState('');
   const [dailyTasks, setDailyTasks] = useState<DailyCollectionTask[]>([]);
   const [duration, setDuration] = useState(120);

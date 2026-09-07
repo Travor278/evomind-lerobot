@@ -17,6 +17,8 @@ eager attention and produces a 50-action chunk.
 | PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | BF16 | Off | 69.8 s | 442 ms | 149.5 ms | 150.2 ms | 8.88 GiB |
 | PyTorch 2.11.0+cu128, Transformers 5.5.4, cuDNN 91900 | BF16 | Off | 69.5 s | 448 ms | 148.7 ms | 150.8 ms | 8.88 GiB |
 | PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | BF16 | max-autotune | 71.2 s | 228.2 s | 75.3 ms | 75.6 ms | 8.92 GiB |
+| PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | FP32 | Off, meta assign | 3.8 s | 526 ms | 229.2 ms | 230.9 ms | 15.73 GiB |
+| PyTorch 2.11.0+cu128, Transformers 5.5.4, cuDNN 91900 | FP32 | Off, meta assign | 4.5 s | 438 ms | 229.2 ms | 232.5 ms | 15.73 GiB |
 
 PyTorch 2.11 improves steady FP32 latency by only about 1.5% and BF16 latency
 by about 0.5%, so the framework minor version is not the primary bottleneck.
@@ -28,11 +30,13 @@ first action.
 The original `train_config.json` records FP32 training with AMP and compile both
 disabled. A fixed-seed action parity probe found that BF16 changed the final
 14-dimensional action by 0.0603 mean absolute error, 0.2385 maximum absolute
-error, and 0.3398 L2 error on one inference. The selected task-parity default is
-therefore PyTorch 2.10 + FP32 + eager attention with compile disabled. BF16
-remains an opt-in latency profile after real-task success validation. A compiled
-profile should only be enabled after the resident preload path can perform and
-verify a complete warm-up before hardware control begins.
+error, and 0.3398 L2 error on one inference. PyTorch 2.10 and 2.11 also produce
+materially different fixed-seed actions even though their steady-state latency is
+nearly identical. The matching checkpoint artifacts on the validated 4090-a host
+explicitly select PyTorch 2.11, so the selected task baseline is PyTorch 2.11 +
+FP32 + eager attention with compile disabled. This is a validated inference
+selection; the exact training framework version was not preserved by
+`train_config.json`. BF16 remains opt-in until real-task success is validated.
 
 Reproduce a row with:
 
