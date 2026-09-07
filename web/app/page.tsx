@@ -24,6 +24,8 @@ export type RuntimeEvent = {
 type RuntimeStatus = { lerobot_version: string | null; runtime: { hostname: string } & StorageInfo; event: RuntimeEvent };
 type PolicyResidency = {
   state: 'empty' | 'loading' | 'ready'; policy_path?: string; policy_type?: string; device?: string; allocated_bytes?: number | null;
+  runtime_environment_kind?: string; runtime_environment_reference?: string | null; runtime_framework?: 'pytorch' | 'jax';
+  runtime_versions?: RuntimeTrainingEnvironment | null; precision?: string; attention_backend?: string;
 };
 type WorkflowRuntime = { running: boolean; job_id: string | null; operation: string | null; event: RuntimeEvent | null; policy_residency?: PolicyResidency };
 type Catalog = { systems: SystemProfile[] };
@@ -1326,6 +1328,8 @@ function PolicyResidencyControls({ resident, residentName, selectedResident, has
     <div className={`policy-residency ${selectedResident ? 'ready' : state}`}>
       <span>显存模型状态</span><strong>{status}</strong>
       {residentName && state !== 'empty' && <small>{residentName}{resident?.policy_type && resident?.device ? ` · ${resident.policy_type.toUpperCase()} · ${resident.device}` : ''}</small>}
+      {ready && resident?.runtime_versions && <small>实际 Worker：Python {resident.runtime_versions.python} · {resident.runtime_framework === 'jax' ? `JAX ${resident.runtime_versions.jax ?? '—'} / jaxlib ${resident.runtime_versions.jaxlib ?? '—'}` : `PyTorch ${resident.runtime_versions.pytorch ?? '—'}`} · CUDA {resident.runtime_versions.cuda ?? '—'}{resident.runtime_versions.transformers ? ` · Transformers ${resident.runtime_versions.transformers}` : ''}{resident.runtime_versions.triton ? ` · Triton ${resident.runtime_versions.triton}` : ''}</small>}
+      {ready && resident?.runtime_environment_reference && <small>{resident.runtime_environment_kind?.toUpperCase()} · {resident.runtime_environment_reference} · {resident.precision ?? 'checkpoint precision'} · {resident.attention_backend ?? 'checkpoint attention'}</small>}
     </div>
     <div className={`policy-actions${ready ? ' resident-ready' : ''}`}>
       <button className="outline" type="button" disabled={runtimeRunning || inspecting || loading || !hasPolicy} onClick={() => void onInspect()}>{inspecting ? '正在检查' : '检查模型兼容性'}</button>

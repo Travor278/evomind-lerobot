@@ -35,6 +35,7 @@ from evomind_lerobot.policy_runtime import (
     RUNTIME_MANIFEST_NAME,
     PolicyRuntimeManifest,
     RuntimeLaunchSpec,
+    capture_training_environment,
     load_runtime_manifest,
     runtime_launch_spec,
     validate_active_runtime,
@@ -891,6 +892,13 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     policy = _load_pretrained_policy(policy_config).to(device)
     policy.eval()
     allocated_bytes = torch.cuda.memory_allocated() if str(device).startswith("cuda") else None
+    runtime_versions = (
+        capture_training_environment(manifest.framework, source="validated_inference").model_dump(
+            mode="json"
+        )
+        if manifest
+        else None
+    )
     return policy, {
         "policy_path": policy_path,
         "policy_type": policy_config.type,
@@ -900,6 +908,8 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
             {
                 "runtime_environment_kind": manifest.environment.kind,
                 "runtime_environment_reference": manifest.environment.reference,
+                "runtime_framework": manifest.framework,
+                "runtime_versions": runtime_versions,
                 "precision": manifest.inference.precision,
                 "attention_backend": manifest.inference.attention_backend,
                 "torch_compile": manifest.inference.torch_compile.model_dump(mode="json"),
