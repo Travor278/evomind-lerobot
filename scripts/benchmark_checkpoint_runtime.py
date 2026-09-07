@@ -19,7 +19,13 @@ def _version(name: str) -> str | None:
         return None
 
 
-def _observation(policy_config) -> dict[str, np.ndarray]:
+def _observation(
+    policy_config,
+    *,
+    state_dim: int | None = None,
+    image_height: int | None = None,
+    image_width: int | None = None,
+) -> dict[str, np.ndarray]:
     from lerobot.configs import FeatureType
 
     observation: dict[str, np.ndarray] = {}
@@ -27,10 +33,14 @@ def _observation(policy_config) -> dict[str, np.ndarray]:
         shape = tuple(int(item) for item in feature.shape)
         if feature.type == FeatureType.VISUAL:
             channels, height, width = shape
+            height = image_height or height
+            width = image_width or width
             if channels not in {1, 3, 4}:
                 raise ValueError(f"Unsupported visual shape for {name}: {shape}")
             observation[name] = np.zeros((height, width, channels), dtype=np.uint8)
         elif feature.type == FeatureType.STATE:
+            if state_dim is not None:
+                shape = (state_dim,)
             observation[name] = np.zeros(shape, dtype=np.float32)
     if not observation:
         raise ValueError("Checkpoint declares no benchmarkable observation features")
@@ -79,7 +89,12 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     load_time_s = time.perf_counter() - load_started
-    observation = _observation(policy_config)
+    observation = _observation(
+        policy_config,
+        state_dim=args.state_dim,
+        image_height=args.image_height,
+        image_width=args.image_width,
+    )
 
     def infer_once() -> tuple[float, list[float]]:
         policy.reset()
@@ -165,6 +180,9 @@ def main() -> int:
     parser.add_argument("--task", default="Insert the copper screw into the black sleeve")
     parser.add_argument("--robot-type", default="bi_piperx_follower")
     parser.add_argument("--torch-threads", type=int, default=24)
+    parser.add_argument("--state-dim", type=int, help="effective raw hardware state dimension")
+    parser.add_argument("--image-height", type=int, help="raw camera frame height before policy resizing")
+    parser.add_argument("--image-width", type=int, help="raw camera frame width before policy resizing")
     parser.add_argument("--precision", choices=("checkpoint", "float32", "bfloat16"), default="checkpoint")
     parser.add_argument("--torch-compile", action="store_true")
     parser.add_argument("--compile-mode", default="max-autotune")
@@ -178,6 +196,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.warmup_runs < 0 or args.measured_runs <= 0 or args.torch_threads <= 0:
         parser.error("warmup-runs must be non-negative; measured-runs and torch-threads must be positive")
+    dimensions = (args.state_dim, args.image_height, args.image_width)
+    if any(value is not None and value <= 0 for value in dimensions):
+        parser.error("state-dim, image-height, and image-width must be positive")
+    if (args.image_height is None) != (args.image_width is None):
+        parser.error("image-height and image-width must be specified together")
     result = benchmark(args)
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
