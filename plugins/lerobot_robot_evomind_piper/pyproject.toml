@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=71"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_evomind_piper"
+version = "0.1.0"
+description = "LeRobot PiperX robot and teleoperator plugin for Evomind workstations"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "lerobot>=0.6.1,<0.7.0",
+  "piper_sdk>=0.6.1,<0.7.0",
+]
+
+[project.scripts]
+lerobot-piper-setup-can = "lerobot_robot_evomind_piper.can_setup:main"
+
+[tool.setuptools.packages.find]
+include = ["lerobot_robot_evomind_piper*"]
