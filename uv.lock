@@ -3143,6 +3143,7 @@ phone = [
     { name = "teleop" },
 ]
 pi = [
+    { name = "accelerate" },
     { name = "scipy" },
     { name = "transformers" },
 ]
@@ -3308,6 +3309,7 @@ requires-dist = [
     { name = "jsonlines", marker = "extra == 'dataset'", specifier = ">=4.0.0,<5.0.0" },
     { name = "jupyter", marker = "extra == 'notebook'", specifier = ">=1.0.0,<2.0.0" },
     { name = "lerobot", extras = ["accelerate-dep"], marker = "extra == 'lingbot-va'" },
+    { name = "lerobot", extras = ["accelerate-dep"], marker = "extra == 'pi'" },
     { name = "lerobot", extras = ["accelerate-dep"], marker = "extra == 'smolvla'" },
     { name = "lerobot", extras = ["accelerate-dep"], marker = "extra == 'training'" },
     { name = "lerobot", extras = ["aloha"], marker = "extra == 'all'" },

@@ -276,6 +276,24 @@
         75.12340700486675,
         75.31933899736032
       ]
+    },
+    {
+      "captured_at": "2026-09-07T18:58:54.471652Z",
+      "environment_label": "studio-torch210-cu128-meta-assign",
+      "device": "cuda:0",
+      "gpu": "NVIDIA GeForce RTX 4090",
+      "driver": "580.173.02",
+      "warmup_runs": 2,
+      "measured_runs": 5,
+      "load_time_s": 3.8038165160105564,
+      "first_inference_ms": 526.4711799682118,
+      "latency_p50_ms": 229.2306519811973,
+      "latency_p95_ms": 230.90729223331437,
+      "peak_memory_bytes": 16894674944,
+      "notes": "Meta initialization; direct safetensors assignment; no random parameter init or weight copy",
+      "versions": null,
+      "inference": null,
+      "samples_ms": []
     }
   ]
 }
