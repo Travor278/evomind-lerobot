@@ -1,4 +1,6 @@
+import os
 import queue
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -11,6 +13,7 @@ from evomind_lerobot.device_config import (
 )
 from evomind_lerobot.events import EventBroker, Operation
 from evomind_lerobot.jobs import JobManager
+from evomind_lerobot.policy_runtime import RuntimeLaunchSpec
 from evomind_lerobot.runtime_service import (
     RolloutStartRequest,
     RuntimeService,
@@ -24,6 +27,7 @@ from evomind_lerobot.runtime_service import (
     _rollout_inference_config,
     _rollout_repo_id,
     _run_policy_resident,
+    _start_process,
 )
 
 
@@ -247,6 +251,39 @@ def test_web_rtc_continuity_settings_fit_short_chunks() -> None:
 
     assert config.rtc.execution_horizon == 12
     assert config.queue_threshold == 11
+
+
+def test_selected_runtime_replaces_parent_import_path_during_spawn(monkeypatch, tmp_path) -> None:
+    original_path = sys.path.copy()
+    original_value = os.environ.get("EVOMIND_RUNTIME_TEST")
+    observed = {}
+
+    class Process:
+        def start(self):
+            observed["path"] = sys.path.copy()
+            observed["environment"] = os.environ.get("EVOMIND_RUNTIME_TEST")
+
+    monkeypatch.setattr(
+        "evomind_lerobot.runtime_service._runtime_interpreter_sys_path",
+        lambda _launch: ["/selected-runtime/site-packages", "/current/evomind/src"],
+    )
+    launch = RuntimeLaunchSpec(
+        python_executable=sys.executable,
+        environment_variables={"EVOMIND_RUNTIME_TEST": "isolated"},
+        environment_kind="python",
+        environment_reference=sys.executable,
+        working_directory=str(tmp_path),
+        manifest=None,
+    )
+
+    _start_process(Process(), launch)
+
+    assert observed == {
+        "path": ["/selected-runtime/site-packages", "/current/evomind/src"],
+        "environment": "isolated",
+    }
+    assert sys.path == original_path
+    assert os.environ.get("EVOMIND_RUNTIME_TEST") == original_value
 
 
 def test_direct_rollout_resolves_policy_from_local_inventory(monkeypatch) -> None:

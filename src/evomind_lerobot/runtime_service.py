@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
 import os
 import re
 import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from queue import Empty
@@ -143,6 +146,36 @@ _MESSAGES = {
 _SPAWN_ENVIRONMENT_LOCK = threading.Lock()
 
 
+def _runtime_interpreter_sys_path(launch: RuntimeLaunchSpec) -> list[str]:
+    """Resolve import paths from the selected interpreter, not from the web-service process.
+
+    ``multiprocessing`` spawn normally serializes the parent's ``sys.path`` and installs it in the child even
+    after ``set_executable`` selects another Python. That can make a worker started with a PyTorch 2.11
+    interpreter import the parent service's PyTorch 2.10 site-packages.
+    """
+    environment = os.environ.copy()
+    environment.update(launch.environment_variables)
+    result = subprocess.run(  # noqa: S603 - executable is the validated checkpoint runtime
+        [
+            launch.python_executable,
+            "-c",
+            "import json, sys; print(json.dumps(sys.path))",
+        ],
+        cwd=launch.working_directory or None,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        paths = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise RuntimeError("Selected runtime did not report a valid Python import path") from error
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise RuntimeError("Selected runtime reported an invalid Python import path")
+    return paths
+
+
 def _start_process(process: multiprocessing.Process, launch: RuntimeLaunchSpec | None = None) -> None:
     """Start a spawn process with a checkpoint-selected interpreter and environment."""
     if launch is None:
@@ -150,8 +183,10 @@ def _start_process(process: multiprocessing.Process, launch: RuntimeLaunchSpec |
         return
     from multiprocessing import spawn
 
+    runtime_sys_path = _runtime_interpreter_sys_path(launch)
     original_executable = spawn.get_executable()
     original_directory = Path.cwd()
+    original_sys_path = sys.path.copy()
     missing = object()
     previous_environment: dict[str, str | object] = {
         key: os.environ.get(key, missing) for key in launch.environment_variables
@@ -162,10 +197,12 @@ def _start_process(process: multiprocessing.Process, launch: RuntimeLaunchSpec |
             os.environ.update(launch.environment_variables)
             if launch.working_directory:
                 os.chdir(launch.working_directory)
+            sys.path[:] = runtime_sys_path
             process.start()
         finally:
             multiprocessing.set_executable(original_executable)
             os.chdir(original_directory)
+            sys.path[:] = original_sys_path
             for key, value in previous_environment.items():
                 if value is missing:
                     os.environ.pop(key, None)
