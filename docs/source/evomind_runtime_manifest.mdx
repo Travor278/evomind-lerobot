@@ -44,6 +44,15 @@ For an existing checkpoint whose original training environment is unknown, use
 runtime. This avoids presenting a later inference environment as the original
 training environment.
 
+When `train_config.json` is present, `capture` records the training precision,
+AMP flag, attention backend, and compile settings separately from inference
+settings. Refresh those fields without deleting benchmark history with:
+
+```bash
+evomind-policy-runtime configure /path/to/pretrained_model \
+  --refresh-training-settings
+```
+
 Run a hardware-free checkpoint benchmark in each candidate Python environment:
 
 ```bash

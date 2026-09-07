@@ -50,6 +50,12 @@ class TrainingEnvironment(BaseModel):
     jaxlib: str | None = None
     transformers: str | None = None
     triton: str | None = None
+    precision: str | None = None
+    use_amp: bool | None = None
+    attention_backend: str | None = None
+    torch_compile: bool | None = None
+    torch_compile_mode: str | None = None
+    settings_source: str | None = None
 
 
 class CompileSettings(BaseModel):
@@ -205,6 +211,39 @@ def capture_training_environment(
 def load_runtime_manifest(checkpoint: Path) -> PolicyRuntimeManifest:
     path = checkpoint / RUNTIME_MANIFEST_NAME
     return PolicyRuntimeManifest.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def checkpoint_training_settings(checkpoint: Path) -> dict[str, Any]:
+    """Read training precision evidence saved alongside a checkpoint."""
+    for filename in ("train_config.json", "config.json"):
+        path = checkpoint / filename
+        if not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        policy = value.get("policy", value)
+        if not isinstance(policy, dict):
+            continue
+        policy_type = str(policy.get("type") or value.get("type") or "")
+        precision = policy.get("dtype")
+        use_amp = policy.get("use_amp")
+        compile_enabled = policy.get("compile_model")
+        compile_mode = policy.get("compile_mode")
+        attention_backend = policy.get("attention_backend") or policy.get("attn_implementation")
+        if not attention_backend and policy_type in {"pi0", "pi05"}:
+            attention_backend = "eager"
+        if any(item is not None for item in (precision, use_amp, compile_enabled, attention_backend)):
+            return {
+                "precision": str(precision) if precision is not None else None,
+                "use_amp": bool(use_amp) if use_amp is not None else None,
+                "attention_backend": str(attention_backend) if attention_backend is not None else None,
+                "torch_compile": bool(compile_enabled) if compile_enabled is not None else None,
+                "torch_compile_mode": str(compile_mode) if compile_mode is not None else None,
+                "settings_source": filename,
+            }
+    return {}
 
 
 def save_runtime_manifest(
@@ -437,7 +476,9 @@ def _load_benchmark(path: Path) -> BenchmarkRecord:
 
 def _capture_command(args: argparse.Namespace) -> int:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
-    training = capture_training_environment(args.framework, source=args.environment_source)
+    training = capture_training_environment(args.framework, source=args.environment_source).model_copy(
+        update=checkpoint_training_settings(checkpoint)
+    )
     environment = ExecutableEnvironment(kind=args.environment_kind, reference=args.environment_reference)
     inference = InferenceSettings(
         device=args.device,
@@ -510,7 +551,10 @@ def _configure_command(args: argparse.Namespace) -> int:
         )
         inference_updates["torch_compile"] = compile_settings
     inference = manifest.inference.model_copy(update=inference_updates)
-    updated = manifest.model_copy(update={"inference": inference})
+    training = manifest.training
+    if args.refresh_training_settings:
+        training = training.model_copy(update=checkpoint_training_settings(checkpoint))
+    updated = manifest.model_copy(update={"inference": inference, "training": training})
     save_runtime_manifest(checkpoint, updated, overwrite=True)
     print(checkpoint / RUNTIME_MANIFEST_NAME)
     return 0
@@ -573,6 +617,7 @@ def _parser() -> argparse.ArgumentParser:
     configure.add_argument("--rollout-backend", choices=("sync", "rtc"))
     configure.add_argument("--torch-compile", choices=("enabled", "disabled"))
     configure.add_argument("--torch-compile-mode")
+    configure.add_argument("--refresh-training-settings", action="store_true")
     configure.set_defaults(handler=_configure_command)
 
     validate = commands.add_parser("validate", help="validate and inspect a checkpoint manifest")

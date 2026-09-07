@@ -20,7 +20,7 @@
   },
   "inference": {
     "device": "cuda:0",
-    "precision": "bfloat16",
+    "precision": "float32",
     "attention_backend": "eager",
     "rollout_backend": "rtc",
     "torch_compile": {

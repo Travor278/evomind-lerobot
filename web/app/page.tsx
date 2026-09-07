@@ -82,6 +82,8 @@ type RuntimeTrainingEnvironment = {
   source?: 'training_capture' | 'checkpoint_metadata' | 'validated_inference'; captured_at?: string | null;
   python: string; cuda: string | null; cudnn: string | null; pytorch: string | null;
   jax: string | null; jaxlib: string | null; transformers: string | null; triton: string | null;
+  precision?: string | null; use_amp?: boolean | null; attention_backend?: string | null;
+  torch_compile?: boolean | null; torch_compile_mode?: string | null; settings_source?: string | null;
 };
 type RuntimeInferenceSettings = {
   device: string; precision: string; attention_backend: string; rollout_backend?: RolloutInference;
@@ -1304,6 +1306,7 @@ function PolicyRuntimeCard({ runtime }: { runtime?: PolicyRuntime }) {
   return <div className={`policy-runtime ${stateClass}`}>
     <div className="policy-runtime-heading"><div><span>Checkpoint 运行环境</span><strong>{manifest.framework.toUpperCase()} · {environmentLabel}</strong></div><i>{runtime.environment_available === false ? '环境不可用' : runtime.compatibility.compatible === false ? '版本不匹配' : '已自动匹配'}</i></div>
     <small>{sourceLabel} · {versions}</small>
+    {training.precision && <small>训练：{training.precision} · AMP {training.use_amp ? '开启' : '关闭'} · {training.attention_backend ?? 'checkpoint attention'} · torch.compile {training.torch_compile ? training.torch_compile_mode ?? '开启' : '关闭'}{training.settings_source ? ` · ${training.settings_source}` : ''}</small>}
     <small>{manifest.inference.rollout_backend?.toUpperCase() ?? 'SYNC'} · {manifest.inference.precision} · {manifest.inference.attention_backend} · torch.compile {compile.enabled ? compile.mode ?? '开启' : '关闭'}{training.transformers ? ` · Transformers ${training.transformers}` : ''}{training.triton ? ` · Triton ${training.triton}` : ''}</small>
     {runtime.compatibility.issues.map((issue) => <small className="policy-runtime-issue" key={issue}>{issue}</small>)}
     {latest && <div className="policy-runtime-benchmark"><span>最近离线 Benchmark · {latest.environment_label}</span><b>加载 {latest.load_time_s.toFixed(1)}s</b><b>首帧 {latest.first_inference_ms.toFixed(0)}ms</b><b>P50 {latest.latency_p50_ms.toFixed(0)}ms</b><b>P95 {latest.latency_p95_ms.toFixed(0)}ms</b><b>峰值 {byteSize(latest.peak_memory_bytes)}</b></div>}

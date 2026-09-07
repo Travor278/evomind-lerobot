@@ -81,14 +81,14 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     load_time_s = time.perf_counter() - load_started
     observation = _observation(policy_config)
 
-    def infer_once() -> float:
+    def infer_once() -> tuple[float, list[float]]:
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         started = time.perf_counter()
-        predict_action(
+        action = predict_action(
             {name: value.copy() for name, value in observation.items()},
             policy,
             device,
@@ -100,14 +100,17 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         )
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        return (time.perf_counter() - started) * 1000
+        return (time.perf_counter() - started) * 1000, action.detach().float().cpu().reshape(-1).tolist()
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    first_inference_ms = infer_once()
+    torch.manual_seed(args.seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
+    first_inference_ms, first_action = infer_once()
     for _ in range(args.warmup_runs):
         infer_once()
-    latencies = [infer_once() for _ in range(args.measured_runs)]
+    latencies = [infer_once()[0] for _ in range(args.measured_runs)]
     peak_memory = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
     captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {
@@ -149,6 +152,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             "jaxlib": None,
         },
         "samples_ms": latencies,
+        **({"first_action": first_action, "seed": args.seed} if args.record_action else {}),
     }
 
 
@@ -167,6 +171,8 @@ def main() -> int:
     parser.add_argument("--warmup-runs", type=int, default=3)
     parser.add_argument("--measured-runs", type=int, default=10)
     parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--seed", type=int, default=20260908)
+    parser.add_argument("--record-action", action="store_true")
     parser.add_argument("--notes")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

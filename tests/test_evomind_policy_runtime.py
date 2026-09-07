@@ -106,6 +106,34 @@ def test_manifest_requires_framework_versions_and_immutable_container() -> None:
         ExecutableEnvironment(kind="container", reference="evomind/pi05:latest")
 
 
+def test_reads_training_precision_from_checkpoint(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "pretrained_model"
+    checkpoint.mkdir()
+    (checkpoint / "train_config.json").write_text(
+        json.dumps(
+            {
+                "policy": {
+                    "type": "pi05",
+                    "dtype": "float32",
+                    "use_amp": False,
+                    "compile_model": False,
+                    "compile_mode": "max-autotune",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert policy_runtime.checkpoint_training_settings(checkpoint) == {
+        "precision": "float32",
+        "use_amp": False,
+        "attention_backend": "eager",
+        "torch_compile": False,
+        "torch_compile_mode": "max-autotune",
+        "settings_source": "train_config.json",
+    }
+
+
 def test_manifest_inspection_reports_current_environment_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
