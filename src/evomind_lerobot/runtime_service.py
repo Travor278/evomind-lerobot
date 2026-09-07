@@ -83,6 +83,7 @@ class RolloutStartRequest(BaseModel):
     episode_time_s: int = Field(default=30, ge=1, le=86_400)
     reset_time_s: int = Field(default=10, ge=0, le=86_400)
     ring_buffer_seconds: int = Field(default=10, ge=1, le=300)
+    return_to_initial_position: bool = False
 
 
 class PolicyInspectRequest(BaseModel):
@@ -187,7 +188,10 @@ def _apply_policy_runtime_settings(policy_config: Any, manifest: PolicyRuntimeMa
         ("dtype", settings.precision),
         ("compile_model", settings.torch_compile.enabled),
         ("compile_mode", settings.torch_compile.mode),
-        ("attn_implementation", settings.attention_backend),
+        (
+            "attn_implementation",
+            settings.attention_backend if settings.attention_backend != "checkpoint" else None,
+        ),
     ):
         if value is not None and hasattr(policy_config, name):
             setattr(policy_config, name, value)
@@ -504,6 +508,8 @@ def _execute_teleoperation(payload: dict[str, Any]) -> None:
             teleop=teleop,
             fps=request.fps,
             display_data=False,
+            read_observation=False,
+            print_loop_timing=False,
         )
     )
 
@@ -697,6 +703,7 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         duration=request.duration_s,
         task=request.task,
         rename_map=inspection["rename_map"],
+        return_to_initial_position=request.return_to_initial_position,
         display_data=False,
         play_sounds=False,
         device=manifest.inference.device if manifest else None,

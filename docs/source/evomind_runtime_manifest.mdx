@@ -17,10 +17,11 @@ Create a manifest from the active environment:
 evomind-policy-runtime capture \
   ~/.cache/huggingface/lerobot/policies/example/pretrained_model \
   --framework pytorch \
+  --environment-source training_capture \
   --environment-kind uv \
   --environment-reference ../../../environments/pi05/uv.lock \
   --precision bfloat16 \
-  --attention-backend sdpa \
+  --attention-backend eager \
   --torch-compile \
   --torch-compile-mode max-autotune
 ```
@@ -36,6 +37,29 @@ are recorded and checked but require a policy-specific JAX runner adapter.
 Environment-variable values are redacted from the workspace API and web page;
 the manifest should still contain performance flags only, never credentials or
 access tokens.
+
+For an existing checkpoint whose original training environment is unknown, use
+`--environment-source validated_inference` after verifying it in a candidate
+runtime. This avoids presenting a later inference environment as the original
+training environment.
+
+Run a hardware-free checkpoint benchmark in each candidate Python environment:
+
+```bash
+/path/to/environment/bin/python scripts/benchmark_checkpoint_runtime.py \
+  /path/to/pretrained_model \
+  --environment-label torch210-cu128-bf16 \
+  --precision bfloat16 \
+  --warmup-runs 2 \
+  --measured-runs 10 \
+  --output /tmp/torch210-bf16.json
+```
+
+The benchmark creates synthetic observations from the checkpoint feature
+schema, measures an end-to-end policy action without opening cameras or robot
+ports, and emits a `BenchmarkRecord` that can be supplied to `capture` with
+`--benchmark`. It records every measured sample in addition to load, first
+inference, P50, P95, and peak accelerator memory.
 
 Append results produced by an offline inference benchmark:
 

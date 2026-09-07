@@ -36,7 +36,7 @@ def pytorch_manifest(**kwargs) -> PolicyRuntimeManifest:
             triton="3.6.0",
         ),
         "environment": ExecutableEnvironment(kind="current"),
-        "inference": InferenceSettings(precision="bfloat16", attention_backend="sdpa"),
+        "inference": InferenceSettings(precision="bfloat16", attention_backend="eager"),
     }
     defaults.update(kwargs)
     return PolicyRuntimeManifest(**defaults)

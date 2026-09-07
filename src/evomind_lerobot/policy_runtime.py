@@ -40,6 +40,8 @@ _VERSION_PACKAGES = {
 class TrainingEnvironment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    source: Literal["training_capture", "checkpoint_metadata", "validated_inference"] = "training_capture"
+    captured_at: datetime | None = None
     python: str = Field(min_length=1)
     cuda: str | None = None
     cudnn: str | None = None
@@ -64,7 +66,7 @@ class InferenceSettings(BaseModel):
 
     device: str = "cuda"
     precision: str = "bfloat16"
-    attention_backend: str = "sdpa"
+    attention_backend: str = "checkpoint"
     torch_compile: CompileSettings = Field(default_factory=CompileSettings)
     environment_variables: dict[str, str] = Field(default_factory=dict)
 
@@ -103,6 +105,9 @@ class BenchmarkRecord(BaseModel):
     latency_p95_ms: float = Field(ge=0)
     peak_memory_bytes: int | None = Field(default=None, ge=0)
     notes: str | None = None
+    versions: TrainingEnvironment | None = None
+    inference: InferenceSettings | None = None
+    samples_ms: list[float] = Field(default_factory=list)
 
 
 class PolicyRuntimeManifest(BaseModel):
@@ -150,7 +155,11 @@ def current_environment() -> dict[str, str | None]:
     }
 
 
-def capture_training_environment(framework: Literal["pytorch", "jax"]) -> TrainingEnvironment:
+def capture_training_environment(
+    framework: Literal["pytorch", "jax"],
+    *,
+    source: Literal["training_capture", "checkpoint_metadata", "validated_inference"] = "training_capture",
+) -> TrainingEnvironment:
     """Capture versions from the active training or inference environment."""
     installed = current_environment()
     cuda = None
@@ -179,6 +188,8 @@ def capture_training_environment(framework: Literal["pytorch", "jax"]) -> Traini
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
     return TrainingEnvironment(
+        source=source,
+        captured_at=datetime.now(UTC),
         python=str(installed["python"]),
         cuda=cuda,
         cudnn=cudnn,
@@ -399,12 +410,33 @@ def inspect_runtime_manifest(checkpoint: Path) -> dict[str, Any]:
 
 
 def _load_benchmark(path: Path) -> BenchmarkRecord:
-    return BenchmarkRecord.model_validate_json(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    versions = value.get("versions")
+    if isinstance(versions, dict):
+        versions.setdefault("source", "validated_inference")
+        versions.setdefault("captured_at", value.get("captured_at"))
+    inference = value.get("inference")
+    if isinstance(inference, dict) and isinstance(inference.get("torch_compile"), bool):
+        enabled = inference["torch_compile"]
+        value["inference"] = {
+            "device": value.get("device", "cuda"),
+            "precision": inference.get("precision", "checkpoint"),
+            "attention_backend": inference.get("attention_backend", "checkpoint"),
+            "torch_compile": {
+                "enabled": enabled,
+                "mode": inference.get("compile_mode") if enabled else None,
+                "backend": "inductor" if enabled else None,
+                "dynamic": None,
+            },
+            "environment_variables": {},
+        }
+    allowed = BenchmarkRecord.model_fields
+    return BenchmarkRecord.model_validate({key: item for key, item in value.items() if key in allowed})
 
 
 def _capture_command(args: argparse.Namespace) -> int:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
-    training = capture_training_environment(args.framework)
+    training = capture_training_environment(args.framework, source=args.environment_source)
     environment = ExecutableEnvironment(kind=args.environment_kind, reference=args.environment_reference)
     inference = InferenceSettings(
         device=args.device,
@@ -464,12 +496,17 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("checkpoint")
     capture.add_argument("--framework", choices=("pytorch", "jax"), required=True)
     capture.add_argument(
+        "--environment-source",
+        choices=("training_capture", "checkpoint_metadata", "validated_inference"),
+        default="training_capture",
+    )
+    capture.add_argument(
         "--environment-kind", choices=("current", "python", "uv", "conda", "container"), default="current"
     )
     capture.add_argument("--environment-reference")
     capture.add_argument("--device", default="cuda")
     capture.add_argument("--precision", default="bfloat16")
-    capture.add_argument("--attention-backend", default="sdpa")
+    capture.add_argument("--attention-backend", default="checkpoint")
     capture.add_argument("--torch-compile", action="store_true")
     capture.add_argument("--torch-compile-mode")
     capture.add_argument("--benchmark", action="append", default=[], help="benchmark JSON file to include")

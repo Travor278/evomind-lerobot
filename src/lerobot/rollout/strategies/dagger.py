@@ -706,7 +706,14 @@ class DAggerStrategy(RolloutStrategy):
                 # does non-trivial key renaming (e.g. a rename_map on action keys), the interpolation in
                 # teleop_smooth_move_to silently no-ops and the arm doesn't move.
                 logger.info("Smooth handover: moving leader arm to follower position")
-                teleop_smooth_move_to(teleop, prev_action)
+                try:
+                    teleop_smooth_move_to(teleop, prev_action)
+                except Exception:
+                    # A failed torque handover must not abort and finalize the
+                    # rollout. Release both leaders and remain paused.
+                    logger.exception("Smooth handover failed; releasing teleoperator and remaining paused")
+                    with contextlib.suppress(Exception):
+                        teleop.disable_torque()
 
         elif old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
             logger.info("Entering correction mode - human teleop control")

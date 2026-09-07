@@ -21,9 +21,12 @@ and :class:`DatasetContext` — assembled into :class:`RolloutContext`.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from copy import copy
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
 
@@ -68,6 +71,50 @@ else:
     PeftModel = None
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_local_tokenizer(pretrained_path: str | None) -> str | None:
+    """Resolve a checkpoint tokenizer from policy-local or shared storage."""
+    if not pretrained_path:
+        return None
+    policy_dir = Path(pretrained_path).expanduser()
+    processor_config = policy_dir / "policy_preprocessor.json"
+    if not processor_config.is_file():
+        return None
+    try:
+        pipeline = json.loads(processor_config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not inspect tokenizer config at %s", processor_config, exc_info=True)
+        return None
+    tokenizer_name = next(
+        (
+            step.get("config", {}).get("tokenizer_name")
+            for step in pipeline.get("steps", ())
+            if step.get("registry_name") == "tokenizer_processor"
+        ),
+        None,
+    )
+    if not isinstance(tokenizer_name, str) or not tokenizer_name.strip():
+        return None
+    configured_name = tokenizer_name.strip()
+    configured = Path(configured_name).expanduser()
+    if configured.is_dir():
+        return None
+    normalized_name = configured_name.replace("\\", "/").strip("/")
+    basename = normalized_name.rsplit("/", 1)[-1]
+    is_stale_path = (
+        configured.is_absolute() or configured_name.startswith(".") or normalized_name.count("/") > 1
+    )
+    registry_names = [basename] if is_stale_path else [normalized_name.replace("/", "--"), basename]
+    lerobot_home = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
+    candidates = [policy_dir / "tokenizer", policy_dir.parent / "tokenizer"]
+    candidates.extend(lerobot_home / "tokenizers" / name for name in dict.fromkeys(registry_names))
+    for candidate in candidates:
+        if (candidate / "tokenizer_config.json").is_file():
+            resolved = str(candidate.resolve())
+            logger.info("Resolved tokenizer %s to local path %s", tokenizer_name, resolved)
+            return resolved
+    return None
 
 
 def _wrap_predict_action_chunk_with_torch_compile(
@@ -474,15 +521,20 @@ def build_rollout_context(
             cfg.rename_map,
         )
 
+    preprocessor_overrides = {
+        "device_processor": {"device": cfg.device},
+        "rename_observations_processor": {"rename_map": cfg.rename_map},
+    }
+    local_tokenizer = _resolve_local_tokenizer(cfg.policy.pretrained_path)
+    if local_tokenizer:
+        preprocessor_overrides["tokenizer_processor"] = {"tokenizer_name": local_tokenizer}
+
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=policy_config,
         pretrained_path=cfg.policy.pretrained_path,
         pretrained_revision=policy_config.pretrained_revision,
         dataset_stats=dataset_stats,
-        preprocessor_overrides={
-            "device_processor": {"device": cfg.device},
-            "rename_observations_processor": {"rename_map": cfg.rename_map},
-        },
+        preprocessor_overrides=preprocessor_overrides,
     )
 
     if isinstance(cfg.inference, SyncInferenceConfig) and any(

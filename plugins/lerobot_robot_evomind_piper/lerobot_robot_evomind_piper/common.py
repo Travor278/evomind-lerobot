@@ -31,6 +31,16 @@ def resolve_piper_can_interface(serial_number: str) -> str:
                 continue
         except OSError:
             continue
+        # Some USB hubs do not propagate ID_SERIAL_SHORT into the net device's
+        # udev properties. The USB interface parent still exposes the adapter
+        # serial directly through sysfs.
+        try:
+            usb_serial_path = (interface_path / "device").resolve().parent / "serial"
+            usb_serial = usb_serial_path.read_text().strip()
+        except OSError:
+            usb_serial = ""
+        if usb_serial == serial_number:
+            return interface_path.name
         try:
             result = subprocess.run(  # nosec B607
                 ["udevadm", "info", "--query=property", f"--path={interface_path}"],
@@ -79,13 +89,20 @@ def parse_piper_log_level(level_name: str) -> Any:
 def wait_enable_piper(arm: Any, timeout_s: float, retry_interval_s: float = 0.2) -> bool:
     deadline = time.monotonic() + max(0.0, timeout_s)
     interval_s = max(0.01, retry_interval_s)
+    confirmed_reads = 0
     while time.monotonic() < deadline:
-        if bool(arm.EnablePiper()):
-            return True
+        # EnablePiper() reads cached status before sending its command. Send the
+        # command first and require two fresh all-enabled reads so a USB reconnect
+        # cannot make stale SDK state look like a successful enable.
+        arm.EnableArm(7)
         remaining_s = deadline - time.monotonic()
         if remaining_s <= 0:
             break
         time.sleep(min(interval_s, remaining_s))
+        enabled = list(arm.GetArmEnableStatus())
+        confirmed_reads = confirmed_reads + 1 if enabled and all(enabled) else 0
+        if confirmed_reads >= 2:
+            return True
     return False
 
 

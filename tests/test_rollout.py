@@ -122,6 +122,22 @@ def test_rtc_reset_invalidates_cached_observation():
     engine._action_queue.clear.assert_called_once_with()
 
 
+def test_rtc_empty_leftover_is_not_a_guidance_prefix():
+    from lerobot.rollout.inference.rtc import _has_rtc_prefix
+
+    assert not _has_rtc_prefix(None)
+    assert not _has_rtc_prefix(torch.empty(0, 12))
+    assert _has_rtc_prefix(torch.zeros(1, 12))
+
+
+def test_rtc_latency_delay_is_bounded_by_execution_horizon():
+    from lerobot.rollout.inference.rtc import _latency_to_delay_steps
+
+    assert _latency_to_delay_steps(None, fps=30, execution_horizon=20) == 0
+    assert _latency_to_delay_steps(0.3, fps=30, execution_horizon=20) == 9
+    assert _latency_to_delay_steps(3.9, fps=30, execution_horizon=20) == 20
+
+
 def test_sentry_config_defaults():
     from lerobot.rollout import SentryStrategyConfig
 

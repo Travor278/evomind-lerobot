@@ -79,22 +79,25 @@ type CalibrationStatus = {
 };
 type LocalDataset = { id: string; path: string; episodes: number; frames: number; fps: number; tasks: number };
 type RuntimeTrainingEnvironment = {
+  source?: 'training_capture' | 'checkpoint_metadata' | 'validated_inference'; captured_at?: string | null;
   python: string; cuda: string | null; cudnn: string | null; pytorch: string | null;
   jax: string | null; jaxlib: string | null; transformers: string | null; triton: string | null;
+};
+type RuntimeInferenceSettings = {
+  device: string; precision: string; attention_backend: string;
+  torch_compile: { enabled: boolean; mode: string | null; backend: string | null; dynamic: boolean | null };
+  environment_variables: Record<string, string>;
 };
 type RuntimeBenchmark = {
   captured_at: string; environment_label: string; device: string; gpu: string | null; driver: string | null;
   warmup_runs: number; measured_runs: number; load_time_s: number; first_inference_ms: number;
   latency_p50_ms: number; latency_p95_ms: number; peak_memory_bytes: number | null; notes: string | null;
+  versions?: RuntimeTrainingEnvironment | null; inference?: RuntimeInferenceSettings | null; samples_ms?: number[];
 };
 type PolicyRuntimeManifest = {
   schema_version: 1; framework: 'pytorch' | 'jax'; training: RuntimeTrainingEnvironment;
   environment: { kind: 'current' | 'python' | 'uv' | 'conda' | 'container'; reference: string | null; working_directory: string | null };
-  inference: {
-    device: string; precision: string; attention_backend: string;
-    torch_compile: { enabled: boolean; mode: string | null; backend: string | null; dynamic: boolean | null };
-    environment_variables: Record<string, string>;
-  };
+  inference: RuntimeInferenceSettings;
   benchmarks: RuntimeBenchmark[];
 };
 type PolicyRuntime = {
@@ -1273,7 +1276,12 @@ function PolicyRuntimeCard({ runtime }: { runtime?: PolicyRuntime }) {
   const training = manifest.training;
   const environment = manifest.environment;
   const compile = manifest.inference.torch_compile;
-  const latest = manifest.benchmarks.at(-1);
+  const latest = manifest.benchmarks.slice().reverse().find((benchmark) =>
+    benchmark.versions?.pytorch === training.pytorch
+    && benchmark.inference?.precision === manifest.inference.precision
+    && benchmark.inference?.torch_compile.enabled === compile.enabled,
+  ) ?? manifest.benchmarks.at(-1);
+  const sourceLabel = training.source === 'validated_inference' ? '已验证推理环境' : training.source === 'checkpoint_metadata' ? 'Checkpoint 元数据' : '训练时捕获';
   const versions = manifest.framework === 'pytorch'
     ? `Python ${training.python} · PyTorch ${training.pytorch ?? '—'} · CUDA ${training.cuda ?? '—'}`
     : `Python ${training.python} · JAX ${training.jax ?? '—'} · jaxlib ${training.jaxlib ?? '—'} · CUDA ${training.cuda ?? '—'}`;
@@ -1281,7 +1289,7 @@ function PolicyRuntimeCard({ runtime }: { runtime?: PolicyRuntime }) {
   const stateClass = runtime.environment_available === false || runtime.compatibility.compatible === false ? 'error' : 'ready';
   return <div className={`policy-runtime ${stateClass}`}>
     <div className="policy-runtime-heading"><div><span>Checkpoint 运行环境</span><strong>{manifest.framework.toUpperCase()} · {environmentLabel}</strong></div><i>{runtime.environment_available === false ? '环境不可用' : runtime.compatibility.compatible === false ? '版本不匹配' : '已自动匹配'}</i></div>
-    <small>{versions}</small>
+    <small>{sourceLabel} · {versions}</small>
     <small>{manifest.inference.precision} · {manifest.inference.attention_backend} · torch.compile {compile.enabled ? compile.mode ?? '开启' : '关闭'}{training.transformers ? ` · Transformers ${training.transformers}` : ''}{training.triton ? ` · Triton ${training.triton}` : ''}</small>
     {runtime.compatibility.issues.map((issue) => <small className="policy-runtime-issue" key={issue}>{issue}</small>)}
     {latest && <div className="policy-runtime-benchmark"><span>最近离线 Benchmark · {latest.environment_label}</span><b>加载 {latest.load_time_s.toFixed(1)}s</b><b>首帧 {latest.first_inference_ms.toFixed(0)}ms</b><b>P50 {latest.latency_p50_ms.toFixed(0)}ms</b><b>P95 {latest.latency_p95_ms.toFixed(0)}ms</b><b>峰值 {byteSize(latest.peak_memory_bytes)}</b></div>}
@@ -1321,7 +1329,12 @@ function WorkflowSummary({ kind, dataset, policy, policyPath, event, error }: { 
   const state = error ? failureState : kind === 'recording' ? rolloutPhaseLabel(event?.data.rollout_phase) ?? event?.message ?? '等待开始' : event?.message || '等待开始';
   const phaseDetail = error && event?.phase !== 'failed' ? '启动失败' : event ? `${event.phase} · ${new Date(event.timestamp).toLocaleTimeString()}` : '尚未启动';
   const errorDetails = error ? <details className="workflow-error-details"><summary>错误详情</summary><pre>{error}</pre></details> : null;
-  if (kind === 'teleoperation') return <div className="workflow-summary"><SummaryItem label="运行状态" value={state} detail={event?.data.fps ? `${Number(event.data.fps).toFixed(1)} FPS` : phaseDetail} />{errorDetails}</div>;
+  if (kind === 'teleoperation') {
+    const timing = event?.data.work_ms !== undefined
+      ? `${Number(event.data.fps).toFixed(1)} FPS · 主臂 ${Number(event.data.teleoperator_ms ?? 0).toFixed(1)} ms · 下发 ${Number(event.data.command_ms ?? 0).toFixed(1)} ms${event.data.deadline_missed ? ' · 超时' : ''}`
+      : event?.data.fps ? `${Number(event.data.fps).toFixed(1)} FPS` : phaseDetail;
+    return <div className="workflow-summary"><SummaryItem label="运行状态" value={state} detail={timing} />{errorDetails}</div>;
+  }
   if (kind === 'recording') return <div className="workflow-summary"><SummaryItem label="采集状态" value={state} detail={event?.data.episode !== undefined ? `Episode ${String(event.data.episode)}${event.data.total_episodes !== undefined ? ` / ${String(event.data.total_episodes)}` : ''}` : event?.data.saved_episodes !== undefined ? `已保存 ${String(event.data.saved_episodes)} Episodes` : phaseDetail} />{errorDetails}</div>;
   if (kind === 'inference') return <div className="workflow-summary"><SummaryItem label="运行状态" value={state} detail={typeof event?.data.rollout_phase === 'string' ? String(event.data.rollout_phase) : phaseDetail} /><SummaryItem label="模型" value={policy?.id ?? (policyPath.split('/').slice(-2).join('/') || '未选择')} detail={policy ? `${policy.type} · 本地 checkpoint` : '本机未选择模型'} />{errorDetails}</div>;
   return <div className="workflow-summary"><SummaryItem label="回放状态" value={state} detail={event?.data.frame !== undefined ? `${String(event.data.frame)} / ${String(event.data.total_frames ?? '—')} 帧` : phaseDetail} /><SummaryItem label={dataset ? dataset.id : '数据集'} value={dataset ? `${dataset.frames} 帧` : '未选择'} detail={dataset ? `${dataset.episodes} Episodes · ${dataset.fps || '—'} FPS` : '未发现本地数据集'} />{errorDetails}</div>;
