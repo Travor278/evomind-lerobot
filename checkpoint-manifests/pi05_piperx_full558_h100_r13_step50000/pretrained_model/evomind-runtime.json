@@ -11,7 +11,13 @@
     "jax": null,
     "jaxlib": null,
     "transformers": "5.3.0",
-    "triton": "3.6.0"
+    "triton": "3.6.0",
+    "precision": "float32",
+    "use_amp": false,
+    "attention_backend": "eager",
+    "torch_compile": false,
+    "torch_compile_mode": "max-autotune",
+    "settings_source": "train_config.json"
   },
   "environment": {
     "kind": "python",
@@ -56,7 +62,13 @@
         "jax": null,
         "jaxlib": null,
         "transformers": "5.3.0",
-        "triton": "3.6.0"
+        "triton": "3.6.0",
+        "precision": null,
+        "use_amp": null,
+        "attention_backend": null,
+        "torch_compile": null,
+        "torch_compile_mode": null,
+        "settings_source": null
       },
       "inference": null,
       "samples_ms": [
@@ -91,7 +103,13 @@
         "jax": null,
         "jaxlib": null,
         "transformers": "5.5.4",
-        "triton": "3.6.0"
+        "triton": "3.6.0",
+        "precision": null,
+        "use_amp": null,
+        "attention_backend": null,
+        "torch_compile": null,
+        "torch_compile_mode": null,
+        "settings_source": null
       },
       "inference": null,
       "samples_ms": [
@@ -126,7 +144,13 @@
         "jax": null,
         "jaxlib": null,
         "transformers": "5.3.0",
-        "triton": "3.6.0"
+        "triton": "3.6.0",
+        "precision": null,
+        "use_amp": null,
+        "attention_backend": null,
+        "torch_compile": null,
+        "torch_compile_mode": null,
+        "settings_source": null
       },
       "inference": {
         "device": "cuda:0",
@@ -173,7 +197,13 @@
         "jax": null,
         "jaxlib": null,
         "transformers": "5.5.4",
-        "triton": "3.6.0"
+        "triton": "3.6.0",
+        "precision": null,
+        "use_amp": null,
+        "attention_backend": null,
+        "torch_compile": null,
+        "torch_compile_mode": null,
+        "settings_source": null
       },
       "inference": {
         "device": "cuda:0",
@@ -220,7 +250,13 @@
         "jax": null,
         "jaxlib": null,
         "transformers": "5.3.0",
-        "triton": "3.6.0"
+        "triton": "3.6.0",
+        "precision": null,
+        "use_amp": null,
+        "attention_backend": null,
+        "torch_compile": null,
+        "torch_compile_mode": null,
+        "settings_source": null
       },
       "inference": {
         "device": "cuda:0",

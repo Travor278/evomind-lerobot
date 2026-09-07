@@ -25,10 +25,14 @@ and peak memory by about 43.6%. `torch.compile(max-autotune)` halves BF16
 steady latency again, but its 228-second cold compile is unsafe as an on-demand
 first action.
 
-The selected default is therefore PyTorch 2.10 + BF16 + eager attention with
-compile disabled. A compiled profile should only be enabled after the resident
-policy preload path can perform and verify a complete warm-up before hardware
-control begins.
+The original `train_config.json` records FP32 training with AMP and compile both
+disabled. A fixed-seed action parity probe found that BF16 changed the final
+14-dimensional action by 0.0603 mean absolute error, 0.2385 maximum absolute
+error, and 0.3398 L2 error on one inference. The selected task-parity default is
+therefore PyTorch 2.10 + FP32 + eager attention with compile disabled. BF16
+remains an opt-in latency profile after real-task success validation. A compiled
+profile should only be enabled after the resident preload path can perform and
+verify a complete warm-up before hardware control begins.
 
 Reproduce a row with:
 
