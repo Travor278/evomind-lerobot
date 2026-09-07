@@ -459,6 +459,28 @@ def test_merge_validates_delay_consistency(action_queue_rtc_enabled, sample_acti
 
     # Check warning was logged
     assert "Indexes diff is not equal to real delay" in caplog.text
+    assert action_queue_rtc_enabled.qsize() == 45
+    assert torch.equal(action_queue_rtc_enabled.get(), sample_actions["processed"][5])
+
+
+def test_first_merge_does_not_drop_actions_for_cold_start_latency(
+    action_queue_rtc_enabled, sample_actions, caplog
+):
+    """Initial inference latency must not skip actions when no prior chunk was executing."""
+    import logging
+
+    caplog.set_level(logging.WARNING)
+
+    action_queue_rtc_enabled.merge(
+        sample_actions["original"],
+        sample_actions["processed"],
+        real_delay=117,
+        action_index_before_inference=0,
+    )
+
+    assert "using actions actually consumed" in caplog.text
+    assert action_queue_rtc_enabled.qsize() == 50
+    assert torch.equal(action_queue_rtc_enabled.get(), sample_actions["processed"][0])
 
 
 def test_merge_no_warning_when_delays_match(action_queue_rtc_enabled, sample_actions, caplog):
@@ -792,6 +814,9 @@ def test_typical_rtc_workflow(action_queue_rtc_enabled, sample_actions):
 
     # Second inference with delay
     action_index_before = action_queue_rtc_enabled.get_action_index()
+    for _ in range(5):
+        action = action_queue_rtc_enabled.get()
+        assert action is not None
 
     action_queue_rtc_enabled.merge(
         sample_actions["original"],

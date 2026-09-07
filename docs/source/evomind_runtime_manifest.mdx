@@ -1,0 +1,110 @@
+# Checkpoint runtime manifests
+
+EvoMind can associate each local policy checkpoint with the exact software
+environment used for training and inference. Place `evomind-runtime.json` next
+to the checkpoint's `config.json`:
+
+```text
+policies/example/pretrained_model/
+├── config.json
+├── model.safetensors
+└── evomind-runtime.json
+```
+
+Create a manifest from the active environment:
+
+```bash
+evomind-policy-runtime capture \
+  ~/.cache/huggingface/lerobot/policies/example/pretrained_model \
+  --framework pytorch \
+  --environment-source training_capture \
+  --environment-kind uv \
+  --environment-reference ../../../environments/pi05/uv.lock \
+  --precision bfloat16 \
+  --attention-backend eager \
+  --rollout-backend rtc \
+  --torch-compile \
+  --torch-compile-mode max-autotune
+```
+
+`environment.reference` identifies the executable environment. Supported
+references are the current server environment, a Python executable, a
+`uv.lock`, a Conda environment, or an immutable container reference of the form
+`image@sha256:...`. Relative file references are resolved from the checkpoint
+directory. Python, uv, and Conda environments are selected automatically for
+PyTorch policy subprocesses. Container references are validated and displayed,
+but require the isolated container runner before execution. JAX environments
+are recorded and checked but require a policy-specific JAX runner adapter.
+Environment-variable values are redacted from the workspace API and web page;
+the manifest should still contain performance flags only, never credentials or
+access tokens.
+
+For an existing checkpoint whose original training environment is unknown, use
+`--environment-source validated_inference` after verifying it in a candidate
+runtime. This avoids presenting a later inference environment as the original
+training environment.
+
+When `train_config.json` is present, `capture` records the training precision,
+AMP flag, attention backend, and compile settings separately from inference
+settings. Refresh those fields without deleting benchmark history with:
+
+```bash
+evomind-policy-runtime configure /path/to/pretrained_model \
+  --refresh-training-settings
+```
+
+Run a hardware-free checkpoint benchmark in each candidate Python environment:
+
+```bash
+/path/to/environment/bin/python scripts/benchmark_checkpoint_runtime.py \
+  /path/to/pretrained_model \
+  --environment-label torch210-cu128-bf16 \
+  --precision bfloat16 \
+  --warmup-runs 2 \
+  --measured-runs 10 \
+  --output /tmp/torch210-bf16.json
+```
+
+The benchmark creates synthetic observations from the checkpoint feature
+schema, measures an end-to-end policy action without opening cameras or robot
+ports, and emits a `BenchmarkRecord` that can be supplied to `capture` with
+`--benchmark`. It records every measured sample in addition to load, first
+inference, P50, P95, and peak accelerator memory.
+
+Append results produced by an offline inference benchmark:
+
+```bash
+evomind-policy-runtime record-benchmark \
+  ~/.cache/huggingface/lerobot/policies/example/pretrained_model \
+  --environment-label torch-2.10-cu128 \
+  --gpu "NVIDIA GeForce RTX 4090" \
+  --driver 590.48 \
+  --warmup-runs 10 \
+  --measured-runs 100 \
+  --load-time-s 11.2 \
+  --first-inference-ms 1850 \
+  --latency-p50-ms 92 \
+  --latency-p95-ms 98 \
+  --peak-memory-bytes 8000000000
+```
+
+Validate a checkpoint before exposing it through the web console:
+
+```bash
+evomind-policy-runtime validate /path/to/pretrained_model
+```
+
+Change the preferred rollout backend without replacing the recorded environment
+or benchmark history:
+
+```bash
+evomind-policy-runtime configure /path/to/pretrained_model \
+  --rollout-backend rtc \
+  --precision bfloat16 \
+  --attention-backend eager \
+  --torch-compile disabled
+```
+
+The workspace API includes the validated manifest, current installed package
+versions, environment availability, and compatibility issues. Invalid or
+missing manifests do not prevent the rest of the workspace from loading.

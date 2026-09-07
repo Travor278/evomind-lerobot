@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from evomind_lerobot.policy_runtime import inspect_runtime_manifest
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 
@@ -44,7 +45,7 @@ def _datasets() -> list[dict[str, Any]]:
     return datasets
 
 
-def _policies() -> list[dict[str, str]]:
+def _policies() -> list[dict[str, Any]]:
     root = HF_LEROBOT_HOME / "policies"
     if not root.is_dir():
         return []
@@ -57,6 +58,7 @@ def _policies() -> list[dict[str, str]]:
                 "id": str(policy_root.relative_to(root)),
                 "path": str(policy_root),
                 "type": str(config["type"]),
+                "runtime": inspect_runtime_manifest(policy_root),
             }
         )
     return policies
@@ -70,5 +72,5 @@ def datasets_inventory() -> list[dict[str, Any]]:
     return _datasets()
 
 
-def policies_inventory() -> list[dict[str, str]]:
+def policies_inventory() -> list[dict[str, Any]]:
     return _policies()

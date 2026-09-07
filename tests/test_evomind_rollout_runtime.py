@@ -18,6 +18,7 @@ from evomind_lerobot.runtime_service import (
     _configured_vector_dimensions,
     _configured_visual_features,
     _normalizer_feature_dim,
+    _offline_camera_aliases,
     _policy_path,
     _robot_payload,
     _rollout_inference_config,
@@ -162,6 +163,19 @@ def test_piper_openpi_camera_mapping_uses_runtime_environment_name() -> None:
     }
 
 
+def test_camera_availability_uses_stable_serials() -> None:
+    configuration = _bi_piperx_configuration()
+    configuration.camera_bindings[0].serial_number = "left-serial"
+    inventory = {
+        "cameras": [
+            {"id": "renumbered-left", "serial_number": "left-serial"},
+            {"id": "front_cam", "serial_number": ""},
+        ]
+    }
+
+    assert _offline_camera_aliases(configuration, inventory) == ["right_wrist"]
+
+
 def test_pi05_camera_mapping_and_vector_dimensions() -> None:
     configuration = _bi_so_configuration()
     provided = _configured_visual_features(configuration)
@@ -217,6 +231,7 @@ def test_rollout_request_exposes_all_web_modes() -> None:
     ):
         request = RolloutStartRequest(policy_path="model", strategy=strategy, task="task")
         assert request.strategy == strategy
+        assert request.return_to_initial_position is True
 
 
 def test_web_rtc_uses_evostudio_continuity_settings() -> None:

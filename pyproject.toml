@@ -217,7 +217,7 @@ wallx = [
     "torchdiffeq>=0.2.4,<0.3.0",
     "lerobot[qwen-vl-utils-dep]",
 ]
-pi = ["lerobot[transformers-dep]", "lerobot[scipy-dep]"]
+pi = ["lerobot[transformers-dep]", "lerobot[scipy-dep]", "lerobot[accelerate-dep]"]
 molmoact2 = ["lerobot[transformers-dep]", "lerobot[peft-dep]", "lerobot[scipy-dep]"]
 smolvla = ["lerobot[transformers-dep]", "num2words>=0.5.14,<0.6.0", "lerobot[accelerate-dep]"]
 multi_task_dit = ["lerobot[transformers-dep]", "lerobot[diffusers-dep]"]
@@ -363,6 +363,7 @@ lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
 evomind-lerobot-serve="evomind_lerobot.cli:main"
+evomind-policy-runtime="evomind_lerobot.policy_runtime:main"
 
 # ---------------- Tool Configurations ----------------
 

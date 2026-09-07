@@ -94,6 +94,18 @@ def _normalize_prev_actions_length(prev_actions: torch.Tensor, target_steps: int
     return padded
 
 
+def _has_rtc_prefix(prev_actions: torch.Tensor | None) -> bool:
+    """Return whether a previous chunk contains actions that can guide RTC."""
+    return prev_actions is not None and prev_actions.numel() > 0
+
+
+def _latency_to_delay_steps(latency: float | None, fps: float, execution_horizon: int) -> int:
+    """Convert latency to a bounded RTC prefix length."""
+    if not latency or latency <= 0:
+        return 0
+    return min(math.ceil(latency * fps), execution_horizon)
+
+
 # ---------------------------------------------------------------------------
 # RTCInferenceEngine
 # ---------------------------------------------------------------------------
@@ -293,8 +305,18 @@ class RTCInferenceEngine(InferenceEngine):
                         idx_before = queue.get_action_index()
                         prev_actions = queue.get_left_over()
 
+                        # Padding an exhausted queue with zeros would guide the
+                        # next chunk toward a false zero-action prefix.
+                        has_rtc_prefix = _has_rtc_prefix(prev_actions)
+                        if not has_rtc_prefix:
+                            prev_actions = None
+
                         latency = latency_tracker.max()
-                        delay = math.ceil(latency / time_per_chunk) if latency else 0
+                        delay = _latency_to_delay_steps(
+                            latency,
+                            self._fps,
+                            self._rtc_config.execution_horizon,
+                        )
 
                         obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
                         obs_batch = prepare_observation_for_inference(
@@ -338,8 +360,13 @@ class RTCInferenceEngine(InferenceEngine):
                         is_warmup = self._use_torch_compile and inference_count <= warmup_required
                         if is_warmup:
                             latency_tracker.reset()
-                        else:
+                        elif has_rtc_prefix:
                             latency_tracker.add(new_latency)
+                        else:
+                            logger.info(
+                                "RTC priming inference latency=%.2fs excluded from delay tracking",
+                                new_latency,
+                            )
 
                         queue.merge(original, processed, new_delay, idx_before)
 

@@ -1,0 +1,47 @@
+# PI0.5 runtime benchmark on 4090-d
+
+This benchmark compares the local
+`pi05_piperx_full558_h100_r13_step50000/pretrained_model` checkpoint without
+opening cameras, CAN interfaces, or robot hardware. It uses synthetic inputs
+with the checkpoint's declared three 480×640 RGB views and 14-dimensional
+state, executes all 10 flow-matching inference steps, resets the action cache
+before every sample, and synchronizes CUDA around every measurement.
+
+Hardware: NVIDIA GeForce RTX 4090, driver 580.173.02, CUDA 12.8. The model uses
+eager attention and produces a 50-action chunk.
+
+| Environment | Precision | Compile | Load | First inference | P50 | P95 | Peak VRAM |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | FP32 | Off | 76.3 s | 486 ms | 232.2 ms | 235.4 ms | 15.75 GiB |
+| PyTorch 2.11.0+cu128, Transformers 5.5.4, cuDNN 91900 | FP32 | Off | 71.6 s | 506 ms | 228.7 ms | 232.8 ms | 15.75 GiB |
+| PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | BF16 | Off | 69.8 s | 442 ms | 149.5 ms | 150.2 ms | 8.88 GiB |
+| PyTorch 2.11.0+cu128, Transformers 5.5.4, cuDNN 91900 | BF16 | Off | 69.5 s | 448 ms | 148.7 ms | 150.8 ms | 8.88 GiB |
+| PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | BF16 | max-autotune | 71.2 s | 228.2 s | 75.3 ms | 75.6 ms | 8.92 GiB |
+
+PyTorch 2.11 improves steady FP32 latency by only about 1.5% and BF16 latency
+by about 0.5%, so the framework minor version is not the primary bottleneck.
+Changing the checkpoint from FP32 to BF16 reduces P50 latency by about 35.6%
+and peak memory by about 43.6%. `torch.compile(max-autotune)` halves BF16
+steady latency again, but its 228-second cold compile is unsafe as an on-demand
+first action.
+
+The original `train_config.json` records FP32 training with AMP and compile both
+disabled. A fixed-seed action parity probe found that BF16 changed the final
+14-dimensional action by 0.0603 mean absolute error, 0.2385 maximum absolute
+error, and 0.3398 L2 error on one inference. The selected task-parity default is
+therefore PyTorch 2.10 + FP32 + eager attention with compile disabled. BF16
+remains an opt-in latency profile after real-task success validation. A compiled
+profile should only be enabled after the resident preload path can perform and
+verify a complete warm-up before hardware control begins.
+
+Reproduce a row with:
+
+```bash
+/path/to/environment/bin/python scripts/benchmark_checkpoint_runtime.py \
+  /path/to/pretrained_model \
+  --environment-label torch210-cu128-bf16 \
+  --precision bfloat16 \
+  --warmup-runs 2 \
+  --measured-runs 5 \
+  --output /tmp/pi05-benchmark.json
+```
