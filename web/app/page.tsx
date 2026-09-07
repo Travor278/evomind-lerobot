@@ -120,7 +120,7 @@ type RolloutInference = 'sync' | 'rtc';
 type PolicyInspection = {
   policy_path: string; policy_type: string; revision: string | null; size_bytes: number | null;
   state_dim: number | null; action_dim: number | null; hardware_state_dim: number | null; hardware_action_dim: number | null;
-  expected_visuals: string[]; provided_visuals: string[]; rename_map: Record<string, string>;
+  expected_visuals: string[]; provided_visuals: string[]; rename_map: Record<string, string>; offline_cameras?: string[];
   supports_rtc: boolean; compatible: boolean; issues: string[];
 };
 
@@ -1221,8 +1221,8 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
   }
 
   const canStart = kind === 'teleoperation'
-    || (kind === 'recording' && Boolean(selectedTask))
-    || (kind === 'inference' && Boolean(effectivePolicyPath && task.trim()))
+    || (kind === 'recording' && Boolean(selectedTask) && (selectedTask?.collection_method !== 'policy' || policyInspection?.compatible === true))
+    || (kind === 'inference' && Boolean(effectivePolicyPath && task.trim()) && policyInspection?.compatible === true)
     || (kind === 'replay' && Boolean(selectedDataset));
   const canControlEpisode = runningThis && recordingPhase === 'running' && !pendingCommand;
   const canSkipReset = runningThis && recordingPhase === 'resetting' && !pendingCommand;

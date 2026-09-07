@@ -18,6 +18,7 @@ from evomind_lerobot.runtime_service import (
     _configured_vector_dimensions,
     _configured_visual_features,
     _normalizer_feature_dim,
+    _offline_camera_aliases,
     _policy_path,
     _robot_payload,
     _rollout_inference_config,
@@ -160,6 +161,19 @@ def test_piper_openpi_camera_mapping_uses_runtime_environment_name() -> None:
         "observation.images.right_environment_1": "observation.images.base_0_rgb",
         "observation.images.right_wrist": "observation.images.right_wrist_0_rgb",
     }
+
+
+def test_camera_availability_uses_stable_serials() -> None:
+    configuration = _bi_piperx_configuration()
+    configuration.camera_bindings[0].serial_number = "left-serial"
+    inventory = {
+        "cameras": [
+            {"id": "renumbered-left", "serial_number": "left-serial"},
+            {"id": "front_cam", "serial_number": ""},
+        ]
+    }
+
+    assert _offline_camera_aliases(configuration, inventory) == ["right_wrist"]
 
 
 def test_pi05_camera_mapping_and_vector_dimensions() -> None:

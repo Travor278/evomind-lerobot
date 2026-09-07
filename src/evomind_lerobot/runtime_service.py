@@ -25,6 +25,7 @@ from evomind_lerobot.device_config import (
     load_device_configuration,
     runtime_id,
 )
+from evomind_lerobot.discovery import hardware_inventory
 from evomind_lerobot.events import EventBroker, Operation, Phase
 from evomind_lerobot.jobs import HardwareBusyError, JobManager
 from evomind_lerobot.policy_runtime import (
@@ -358,6 +359,21 @@ def _configured_visual_features(configuration: DeviceConfiguration) -> set[str]:
     }
 
 
+def _offline_camera_aliases(
+    configuration: DeviceConfiguration,
+    inventory: dict[str, Any],
+) -> list[str]:
+    cameras = inventory.get("cameras", [])
+    available_ids = {str(camera.get("id") or camera.get("path") or "") for camera in cameras}
+    available_serials = {str(camera.get("serial_number") or "") for camera in cameras}
+    return sorted(
+        binding.alias
+        for binding in configuration.camera_bindings
+        if binding.id not in available_ids
+        and (not binding.serial_number or binding.serial_number not in available_serials)
+    )
+
+
 def _configured_vector_dimensions(configuration: DeviceConfiguration) -> tuple[int | None, int | None]:
     """Infer fixed arm vector dimensions for compatibility checks."""
     robot_count = len(_device_bindings(configuration, "robot"))
@@ -585,6 +601,9 @@ def inspect_policy_compatibility(request: PolicyInspectRequest) -> dict[str, Any
         issues.append(f"状态维度不匹配：模型 {state_dim}，设备 {hardware_state_dim}")
     if hardware_action_dim is not None and action_dim is not None and hardware_action_dim != action_dim:
         issues.append(f"动作维度不匹配：模型 {action_dim}，设备 {hardware_action_dim}")
+    offline_cameras = _offline_camera_aliases(configuration, hardware_inventory())
+    if offline_cameras:
+        issues.append(f"摄像头未连接：{', '.join(offline_cameras)}")
 
     revision: str | None = None
     size_bytes: int | None = None
@@ -611,6 +630,7 @@ def inspect_policy_compatibility(request: PolicyInspectRequest) -> dict[str, Any
         "hardware_action_dim": hardware_action_dim,
         "expected_visuals": sorted(expected_visuals),
         "provided_visuals": sorted(provided_visuals),
+        "offline_cameras": offline_cameras,
         "rename_map": rename_map,
         "supports_rtc": policy.type in {"pi0", "pi05", "pi0_fast"},
         "compatible": not issues,
