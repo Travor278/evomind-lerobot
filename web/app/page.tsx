@@ -84,7 +84,7 @@ type RuntimeTrainingEnvironment = {
   jax: string | null; jaxlib: string | null; transformers: string | null; triton: string | null;
 };
 type RuntimeInferenceSettings = {
-  device: string; precision: string; attention_backend: string;
+  device: string; precision: string; attention_backend: string; rollout_backend?: RolloutInference;
   torch_compile: { enabled: boolean; mode: string | null; backend: string | null; dynamic: boolean | null };
   environment_variables: Record<string, string>;
 };
@@ -1070,7 +1070,7 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
   const [taskId, setTaskId] = useState('');
   const [dailyTasks, setDailyTasks] = useState<DailyCollectionTask[]>([]);
   const [duration, setDuration] = useState(120);
-  const [inference, setInference] = useState<RolloutInference>('sync');
+  const [inference, setInference] = useState<RolloutInference>(workspace.policies[0]?.runtime?.manifest?.inference.rollout_backend ?? 'sync');
   const [policyPath, setPolicyPath] = useState(workspace.policies[0]?.path ?? '');
   const [policyInspection, setPolicyInspection] = useState<PolicyInspection | null>(null);
   const [policyInspecting, setPolicyInspecting] = useState(false);
@@ -1134,6 +1134,19 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
   const effectiveDatasetId = datasetId || workspace.datasets[0]?.id || '';
   const selectedDataset = workspace.datasets.find((item) => item.id === effectiveDatasetId);
   const selectedPolicy = workspace.policies.find((item) => item.path === effectivePolicyPath);
+  useEffect(() => {
+    if (!effectivePolicyPath || (kind !== 'inference' && selectedTask?.collection_method !== 'policy')) return;
+    let active = true;
+    Promise.resolve()
+      .then(() => {
+        if (active) setPolicyInspecting(true);
+        return postJson<PolicyInspection>('/api/runtime/policy/inspect', { policy_path: effectivePolicyPath });
+      })
+      .then((inspection) => { if (active) setPolicyInspection(inspection); })
+      .catch((error) => { if (active) setOperationError(error instanceof Error ? error.message : '模型检查失败'); })
+      .finally(() => { if (active) setPolicyInspecting(false); });
+    return () => { active = false; };
+  }, [effectivePolicyPath, kind, selectedTask?.collection_method]);
   const runningThis = runtime.running && runtime.operation === operation;
   const runningOther = runtime.running && !runningThis;
   const event = newestRuntimeEvent(
@@ -1158,7 +1171,7 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
     if ((kind === 'inference' || selectedTask?.collection_method === 'policy') && !window.confirm('Policy 会直接驱动机械臂。请确认急停可用、周围空间已清空，并让操作员随时准备接管。')) return;
     let body: Record<string, unknown> = { fps };
     if (kind === 'recording') body = { task_id: taskId };
-    if (kind === 'inference') body = { policy_path: effectivePolicyPath, strategy: 'base', inference, task, fps, duration_s: duration };
+    if (kind === 'inference') body = { policy_path: effectivePolicyPath, strategy: 'base', inference, task, fps, duration_s: duration, return_to_initial_position: true };
     if (kind === 'replay') body = { dataset_id: effectiveDatasetId, episode };
     try { setRuntime(await postJson<WorkflowRuntime>(endpoint, body)); }
     catch (startError) { setOperationError(startError instanceof Error ? startError.message : '启动失败'); }
@@ -1241,7 +1254,7 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
         {selectedTask?.collection_method === 'policy' && <><label>采集策略<input value={rolloutModes[selectedTask.rollout_strategy].label} readOnly /></label><label>推理后端<input value={selectedTask.inference === 'rtc' ? 'RTC 实时分块' : '同步推理'} readOnly /></label><label className="full-field">本地 Policy<input value={selectedPolicy?.id ?? selectedTask.policy_path} readOnly /></label>{selectedTask.rollout_strategy !== 'episodic_dagger' && <label>最大运行时间<input value={`${selectedTask.duration_s} 秒`} readOnly /></label>}<label>帧率<input value={`${selectedTask.fps} FPS`} readOnly /></label></>}
       </div>{selectedTask?.collection_method === 'policy' && selectedPolicy && <PolicyRuntimeCard runtime={selectedPolicy.runtime} />}{selectedTask?.collection_method === 'policy' && policyControls}{policyInspection && <PolicyInspectionResult inspection={policyInspection} />}</WorkflowSection></>}
       {kind === 'inference' && <WorkflowSection title="本地 Policy 试跑"><div className="form-grid">
-        <label className="full-field">Policy<select value={effectivePolicyPath} onChange={(item) => { setPolicyPath(item.target.value); setPolicyInspection(null); }} disabled={runningThis || policyPreloading}>{workspace.policies.length === 0 && <option value="">本机未发现模型</option>}{workspace.policies.map((policy) => <option value={policy.path} key={policy.path}>{policy.id} · {policy.type}</option>)}</select>{effectivePolicyPath && <small className="field-help">本机路径：{effectivePolicyPath}</small>}</label>
+        <label className="full-field">Policy<select value={effectivePolicyPath} onChange={(item) => { const path = item.target.value; const policy = workspace.policies.find((candidate) => candidate.path === path); setPolicyPath(path); setInference(policy?.runtime?.manifest?.inference.rollout_backend ?? 'sync'); setPolicyInspection(null); }} disabled={runningThis || policyPreloading}>{workspace.policies.length === 0 && <option value="">本机未发现模型</option>}{workspace.policies.map((policy) => <option value={policy.path} key={policy.path}>{policy.id} · {policy.type}</option>)}</select>{effectivePolicyPath && <small className="field-help">本机路径：{effectivePolicyPath}</small>}</label>
         <label>推理后端<select value={inference} onChange={(item) => setInference(item.target.value as RolloutInference)} disabled={runningThis}><option value="sync">同步推理</option><option value="rtc">RTC 实时分块</option></select></label>
         <label>最大运行时间<input type="number" value={duration} onChange={(item) => setDuration(Number(item.target.value))} disabled={runningThis} min="1" /></label>
         <label>帧率<select value={fps} onChange={(item) => setFps(Number(item.target.value))} disabled={runningThis}><option value="30">30 FPS</option><option value="20">20 FPS</option><option value="15">15 FPS</option></select></label>
@@ -1260,7 +1273,8 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
 }
 
 function PolicyInspectionResult({ inspection }: { inspection: PolicyInspection }) {
-  return <div className={`calibration-progress ${inspection.compatible ? 'done' : 'error'}`}><div><span>{inspection.policy_type.toUpperCase()} · {inspection.revision?.slice(0, 10) ?? '本地模型'}</span><strong>{inspection.compatible ? '模型与当前设备兼容' : '模型与当前设备不兼容'}</strong><small>状态/动作 {inspection.state_dim ?? '—'} / {inspection.action_dim ?? '—'} 维 · 摄像头 {inspection.expected_visuals.length} 路{Object.keys(inspection.rename_map).length > 0 ? ` · 自动映射 ${Object.entries(inspection.rename_map).map(([from, to]) => `${from.split('.').pop()} → ${to.split('.').pop()}`).join(', ')}` : ''}</small>{inspection.issues.map((issue) => <small key={issue}>{issue}</small>)}</div></div>;
+  const mapping = inspection.provided_visuals.map((source) => `${source.split('.').pop()} → ${(inspection.rename_map[source] ?? source).split('.').pop()}`).join(', ');
+  return <div className={`calibration-progress ${inspection.compatible ? 'done' : 'error'}`}><div><span>{inspection.policy_type.toUpperCase()} · {inspection.revision?.slice(0, 10) ?? '本地模型'}</span><strong>{inspection.compatible ? '模型与相机输入已对齐' : '模型与当前设备不兼容'}</strong><small>状态/动作 {inspection.state_dim ?? '—'} / {inspection.action_dim ?? '—'} 维 · 摄像头 {inspection.expected_visuals.length} 路</small>{mapping && <small>实际输入：{mapping}</small>}{inspection.issues.map((issue) => <small key={issue}>{issue}</small>)}</div></div>;
 }
 
 function byteSize(value: number | null) {
@@ -1290,7 +1304,7 @@ function PolicyRuntimeCard({ runtime }: { runtime?: PolicyRuntime }) {
   return <div className={`policy-runtime ${stateClass}`}>
     <div className="policy-runtime-heading"><div><span>Checkpoint 运行环境</span><strong>{manifest.framework.toUpperCase()} · {environmentLabel}</strong></div><i>{runtime.environment_available === false ? '环境不可用' : runtime.compatibility.compatible === false ? '版本不匹配' : '已自动匹配'}</i></div>
     <small>{sourceLabel} · {versions}</small>
-    <small>{manifest.inference.precision} · {manifest.inference.attention_backend} · torch.compile {compile.enabled ? compile.mode ?? '开启' : '关闭'}{training.transformers ? ` · Transformers ${training.transformers}` : ''}{training.triton ? ` · Triton ${training.triton}` : ''}</small>
+    <small>{manifest.inference.rollout_backend?.toUpperCase() ?? 'SYNC'} · {manifest.inference.precision} · {manifest.inference.attention_backend} · torch.compile {compile.enabled ? compile.mode ?? '开启' : '关闭'}{training.transformers ? ` · Transformers ${training.transformers}` : ''}{training.triton ? ` · Triton ${training.triton}` : ''}</small>
     {runtime.compatibility.issues.map((issue) => <small className="policy-runtime-issue" key={issue}>{issue}</small>)}
     {latest && <div className="policy-runtime-benchmark"><span>最近离线 Benchmark · {latest.environment_label}</span><b>加载 {latest.load_time_s.toFixed(1)}s</b><b>首帧 {latest.first_inference_ms.toFixed(0)}ms</b><b>P50 {latest.latency_p50_ms.toFixed(0)}ms</b><b>P95 {latest.latency_p95_ms.toFixed(0)}ms</b><b>峰值 {byteSize(latest.peak_memory_bytes)}</b></div>}
   </div>;

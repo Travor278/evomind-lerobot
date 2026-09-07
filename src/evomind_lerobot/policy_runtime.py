@@ -67,6 +67,7 @@ class InferenceSettings(BaseModel):
     device: str = "cuda"
     precision: str = "bfloat16"
     attention_backend: str = "checkpoint"
+    rollout_backend: Literal["sync", "rtc"] = "sync"
     torch_compile: CompileSettings = Field(default_factory=CompileSettings)
     environment_variables: dict[str, str] = Field(default_factory=dict)
 
@@ -442,6 +443,7 @@ def _capture_command(args: argparse.Namespace) -> int:
         device=args.device,
         precision=args.precision,
         attention_backend=args.attention_backend,
+        rollout_backend=args.rollout_backend,
         torch_compile=CompileSettings(enabled=args.torch_compile, mode=args.torch_compile_mode),
     )
     benchmarks = [_load_benchmark(Path(item)) for item in args.benchmark]
@@ -481,6 +483,39 @@ def _benchmark_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _configure_command(args: argparse.Namespace) -> int:
+    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    manifest = load_runtime_manifest(checkpoint)
+    inference_updates = {
+        name: value
+        for name, value in (
+            ("device", args.device),
+            ("precision", args.precision),
+            ("attention_backend", args.attention_backend),
+            ("rollout_backend", args.rollout_backend),
+        )
+        if value is not None
+    }
+    compile_settings = manifest.inference.torch_compile
+    if args.torch_compile is not None or args.torch_compile_mode is not None:
+        compile_settings = compile_settings.model_copy(
+            update={
+                "enabled": args.torch_compile == "enabled"
+                if args.torch_compile is not None
+                else compile_settings.enabled,
+                "mode": args.torch_compile_mode
+                if args.torch_compile_mode is not None
+                else compile_settings.mode,
+            }
+        )
+        inference_updates["torch_compile"] = compile_settings
+    inference = manifest.inference.model_copy(update=inference_updates)
+    updated = manifest.model_copy(update={"inference": inference})
+    save_runtime_manifest(checkpoint, updated, overwrite=True)
+    print(checkpoint / RUNTIME_MANIFEST_NAME)
+    return 0
+
+
 def _validate_command(args: argparse.Namespace) -> int:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     result = inspect_runtime_manifest(checkpoint)
@@ -507,6 +542,7 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--device", default="cuda")
     capture.add_argument("--precision", default="bfloat16")
     capture.add_argument("--attention-backend", default="checkpoint")
+    capture.add_argument("--rollout-backend", choices=("sync", "rtc"), default="sync")
     capture.add_argument("--torch-compile", action="store_true")
     capture.add_argument("--torch-compile-mode")
     capture.add_argument("--benchmark", action="append", default=[], help="benchmark JSON file to include")
@@ -528,6 +564,16 @@ def _parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--peak-memory-bytes", type=int)
     benchmark.add_argument("--notes")
     benchmark.set_defaults(handler=_benchmark_command)
+
+    configure = commands.add_parser("configure", help="update runtime selection without losing benchmarks")
+    configure.add_argument("checkpoint")
+    configure.add_argument("--device")
+    configure.add_argument("--precision")
+    configure.add_argument("--attention-backend")
+    configure.add_argument("--rollout-backend", choices=("sync", "rtc"))
+    configure.add_argument("--torch-compile", choices=("enabled", "disabled"))
+    configure.add_argument("--torch-compile-mode")
+    configure.set_defaults(handler=_configure_command)
 
     validate = commands.add_parser("validate", help="validate and inspect a checkpoint manifest")
     validate.add_argument("checkpoint")

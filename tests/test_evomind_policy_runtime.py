@@ -80,6 +80,24 @@ def test_manifest_round_trip_and_refuses_accidental_overwrite(tmp_path: Path) ->
     with pytest.raises(FileExistsError):
         save_runtime_manifest(checkpoint, manifest)
 
+    args = policy_runtime._parser().parse_args(
+        [
+            "configure",
+            str(checkpoint),
+            "--rollout-backend",
+            "rtc",
+            "--precision",
+            "bfloat16",
+            "--torch-compile",
+            "disabled",
+        ]
+    )
+    assert args.handler(args) == 0
+    configured = load_runtime_manifest(checkpoint)
+    assert configured.inference.rollout_backend == "rtc"
+    assert configured.inference.precision == "bfloat16"
+    assert configured.benchmarks == manifest.benchmarks
+
 
 def test_manifest_requires_framework_versions_and_immutable_container() -> None:
     with pytest.raises(ValidationError, match="training.pytorch"):

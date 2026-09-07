@@ -22,6 +22,7 @@ evomind-policy-runtime capture \
   --environment-reference ../../../environments/pi05/uv.lock \
   --precision bfloat16 \
   --attention-backend eager \
+  --rollout-backend rtc \
   --torch-compile \
   --torch-compile-mode max-autotune
 ```
@@ -82,6 +83,17 @@ Validate a checkpoint before exposing it through the web console:
 
 ```bash
 evomind-policy-runtime validate /path/to/pretrained_model
+```
+
+Change the preferred rollout backend without replacing the recorded environment
+or benchmark history:
+
+```bash
+evomind-policy-runtime configure /path/to/pretrained_model \
+  --rollout-backend rtc \
+  --precision bfloat16 \
+  --attention-backend eager \
+  --torch-compile disabled
 ```
 
 The workspace API includes the validated manifest, current installed package

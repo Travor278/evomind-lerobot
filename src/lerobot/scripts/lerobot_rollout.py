@@ -209,6 +209,12 @@ def rollout(cfg: RolloutConfig):
         "starting",
         robot_type=cfg.robot.type if cfg.robot is not None else None,
         strategy=cfg.strategy.type,
+        inference_backend=cfg.inference.type,
+        policy_type=cfg.policy.type if cfg.policy is not None else None,
+        device=cfg.device,
+        precision=getattr(cfg.policy, "dtype", None),
+        camera_mapping=cfg.rename_map,
+        return_to_initial_position=cfg.return_to_initial_position,
     )
 
     if cfg.display_data:
@@ -245,6 +251,12 @@ def rollout(cfg: RolloutConfig):
             strategy=cfg.strategy.type,
             control_source="policy",
             records_data=cfg.dataset is not None,
+            inference_backend=cfg.inference.type,
+            policy_type=cfg.policy.type if cfg.policy is not None else None,
+            device=cfg.device,
+            precision=getattr(cfg.policy, "dtype", None),
+            camera_mapping=cfg.rename_map,
+            return_to_initial_position=cfg.return_to_initial_position,
         )
         strategy.run(ctx)
     except KeyboardInterrupt:

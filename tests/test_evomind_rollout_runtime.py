@@ -217,7 +217,7 @@ def test_rollout_request_exposes_all_web_modes() -> None:
     ):
         request = RolloutStartRequest(policy_path="model", strategy=strategy, task="task")
         assert request.strategy == strategy
-        assert request.return_to_initial_position is False
+        assert request.return_to_initial_position is True
 
 
 def test_web_rtc_uses_evostudio_continuity_settings() -> None:

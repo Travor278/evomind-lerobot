@@ -83,7 +83,7 @@ class RolloutStartRequest(BaseModel):
     episode_time_s: int = Field(default=30, ge=1, le=86_400)
     reset_time_s: int = Field(default=10, ge=0, le=86_400)
     ring_buffer_seconds: int = Field(default=10, ge=1, le=300)
-    return_to_initial_position: bool = False
+    return_to_initial_position: bool = True
 
 
 class PolicyInspectRequest(BaseModel):
