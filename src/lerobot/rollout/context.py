@@ -74,18 +74,27 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_local_tokenizer(pretrained_path: str | None) -> str | None:
-    """Resolve a checkpoint tokenizer from policy-local or shared storage."""
+    """Resolve a checkpoint tokenizer from policy-local or shared storage.
+
+    Training checkpoints may retain either a Hub ID or an absolute tokenizer
+    path from the training machine.  Rollout hosts keep reusable tokenizers in
+    ``$HF_LEROBOT_HOME/tokenizers``; resolve both forms without modifying the
+    checkpoint on disk.
+    """
     if not pretrained_path:
         return None
+
     policy_dir = Path(pretrained_path).expanduser()
     processor_config = policy_dir / "policy_preprocessor.json"
     if not processor_config.is_file():
         return None
+
     try:
         pipeline = json.loads(processor_config.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         logger.warning("Could not inspect tokenizer config at %s", processor_config, exc_info=True)
         return None
+
     tokenizer_name = next(
         (
             step.get("config", {}).get("tokenizer_name")
@@ -96,31 +105,23 @@ def _resolve_local_tokenizer(pretrained_path: str | None) -> str | None:
     )
     if not isinstance(tokenizer_name, str) or not tokenizer_name.strip():
         return None
-    configured_name = tokenizer_name.strip()
-    local_candidates = [policy_dir / "tokenizer", policy_dir.parent / "tokenizer"]
-    for candidate in local_candidates:
-        if (candidate / "tokenizer_config.json").is_file():
-            resolved = str(candidate.resolve())
-            logger.info("Resolved tokenizer %s to checkpoint-local path %s", tokenizer_name, resolved)
-            return resolved
 
+    configured_name = tokenizer_name.strip()
     configured = Path(configured_name).expanduser()
-    try:
-        if configured.is_dir():
-            return None
-    except OSError:
-        logger.info("Configured tokenizer path is inaccessible and will be treated as stale: %s", configured)
+    if configured.is_dir():
+        return None
+
     normalized_name = configured_name.replace("\\", "/").strip("/")
     basename = normalized_name.rsplit("/", 1)[-1]
     is_stale_path = (
         configured.is_absolute() or configured_name.startswith(".") or normalized_name.count("/") > 1
     )
     registry_names = [basename] if is_stale_path else [normalized_name.replace("/", "--"), basename]
+
     lerobot_home = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-    shared_candidates = [
-        lerobot_home / "tokenizers" / name for name in dict.fromkeys(registry_names)
-    ]
-    for candidate in shared_candidates:
+    candidates = [policy_dir / "tokenizer", policy_dir.parent / "tokenizer"]
+    candidates.extend(lerobot_home / "tokenizers" / name for name in dict.fromkeys(registry_names))
+    for candidate in candidates:
         if (candidate / "tokenizer_config.json").is_file():
             resolved = str(candidate.resolve())
             logger.info("Resolved tokenizer %s to local path %s", tokenizer_name, resolved)
@@ -206,6 +207,7 @@ class HardwareContext:
     robot_wrapper: ThreadSafeRobot
     teleop: Teleoperator | None
     initial_position: dict | None = None
+    disconnect_on_teardown: bool = True
 
 
 @dataclass
@@ -300,6 +302,8 @@ def build_rollout_context(
     teleop_action_processor: RobotProcessorPipeline | None = None,
     robot_action_processor: RobotProcessorPipeline | None = None,
     robot_observation_processor: RobotProcessorPipeline | None = None,
+    connected_hardware: HardwareContext | None = None,
+    keep_hardware_connected: bool = False,
 ) -> RolloutContext:
     """Wire up policy, processors, hardware, dataset, and inference engine.
 
@@ -366,24 +370,38 @@ def build_rollout_context(
         robot_observation_processor = robot_observation_processor or _o
 
     # --- 3. Hardware (heaviest side-effect, deferred) -----------------
-    logger.info("Connecting robot (%s)...", cfg.robot.type if cfg.robot else "?")
-    robot = make_robot_from_config(cfg.robot)
-    robot.connect()
-    logger.info("Robot connected: %s", robot.name)
+    if connected_hardware is None:
+        logger.info("Connecting robot (%s)...", cfg.robot.type if cfg.robot else "?")
+        robot = make_robot_from_config(cfg.robot)
+        robot.connect()
+        logger.info("Robot connected: %s", robot.name)
 
-    # Store the initial joint positions so we can return to a safe pose on shutdown.
-    initial_obs = robot.get_observation()
-    initial_position = {k: v for k, v in initial_obs.items() if k.endswith(".pos")}
-    logger.info("Captured initial robot position (%d keys)", len(initial_position))
+        # Store the initial joint positions so the full device session can return
+        # to a known pose when it is explicitly released.
+        initial_obs = robot.get_observation()
+        initial_position = {k: v for k, v in initial_obs.items() if k.endswith(".pos")}
+        logger.info("Captured initial robot position (%d keys)", len(initial_position))
 
-    robot_wrapper = ThreadSafeRobot(robot)
+        robot_wrapper = ThreadSafeRobot(robot)
 
-    teleop = None
-    if cfg.teleop is not None:
-        logger.info("Connecting teleoperator (%s)...", cfg.teleop.type if cfg.teleop else "?")
-        teleop = make_teleoperator_from_config(cfg.teleop)
-        teleop.connect()
-        logger.info("Teleoperator connected")
+        teleop = None
+        if cfg.teleop is not None:
+            logger.info("Connecting teleoperator (%s)...", cfg.teleop.type if cfg.teleop else "?")
+            teleop = make_teleoperator_from_config(cfg.teleop)
+            teleop.connect()
+            logger.info("Teleoperator connected")
+    else:
+        robot_wrapper = connected_hardware.robot_wrapper
+        robot = robot_wrapper.inner
+        teleop = connected_hardware.teleop
+        initial_position = connected_hardware.initial_position
+        if not robot.is_connected:
+            raise RuntimeError("The resident robot session is no longer connected")
+        if cfg.teleop is not None and (teleop is None or not teleop.is_connected):
+            raise RuntimeError("The resident teleoperator session is no longer connected")
+        if cfg.teleop is None and teleop is not None:
+            raise RuntimeError("The resident hardware session has an incompatible teleoperator")
+        logger.info("Reusing connected robot and cameras: %s", robot.name)
 
     # TODO(Steven): once Teleoperator motor-control methods are standardised
     # (``enable_torque`` / ``disable_torque`` / ``write_goal_positions``), gate
@@ -585,7 +603,10 @@ def build_rollout_context(
     return RolloutContext(
         runtime=RuntimeContext(cfg=cfg, shutdown_event=shutdown_event),
         hardware=HardwareContext(
-            robot_wrapper=robot_wrapper, teleop=teleop, initial_position=initial_position
+            robot_wrapper=robot_wrapper,
+            teleop=teleop,
+            initial_position=initial_position,
+            disconnect_on_teardown=not keep_hardware_connected,
         ),
         policy=PolicyContext(
             policy=policy,

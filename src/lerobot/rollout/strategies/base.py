@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import time
 
+from lerobot.utils.hardware_recovery import hardware_frame
 from lerobot.utils.robot_utils import precise_sleep
 
 from ..context import RolloutContext
@@ -53,28 +54,29 @@ class BaseStrategy(RolloutStrategy):
         logger.info("Base strategy control loop started")
 
         while not ctx.runtime.shutdown_event.is_set():
-            loop_start = time.perf_counter()
+            with hardware_frame("rollout", self._on_hardware_recovered, self._on_hardware_interrupted):
+                loop_start = time.perf_counter()
 
-            if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
-                logger.info("Duration limit reached (%.0fs)", cfg.duration)
-                break
+                if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
+                    logger.info("Duration limit reached (%.0fs)", cfg.duration)
+                    break
 
-            obs = robot.get_observation()
-            obs_processed = self._process_observation_and_notify(ctx.processors, obs)
+                obs = robot.get_observation()
+                obs_processed = self._process_observation_and_notify(ctx.processors, obs)
 
-            if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
-                continue
+                if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
+                    continue
 
-            action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
-            self._log_telemetry(obs_processed, action_dict, ctx.runtime)
+                action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
+                self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
-            dt = time.perf_counter() - loop_start
-            if (sleep_t := control_interval - dt) > 0:
-                precise_sleep(sleep_t)
-            else:
-                logger.warning(
-                    f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({cfg.fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
-                )
+                dt = time.perf_counter() - loop_start
+                if (sleep_t := control_interval - dt) > 0:
+                    precise_sleep(sleep_t)
+                else:
+                    logger.warning(
+                        f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({cfg.fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+                    )
 
     def teardown(self, ctx: RolloutContext) -> None:
         """Disconnect hardware and stop inference."""

@@ -60,7 +60,7 @@ from ..common.vla_utils import (
     prepare_attention_masks_4d,
     resize_with_pad_torch,
 )
-from ..pretrained import PreTrainedPolicy, T, load_safetensors_into_meta_model
+from ..pretrained import PreTrainedPolicy, T
 from ..rtc.modeling_rtc import RTCProcessor
 from .configuration_pi05 import DEFAULT_IMAGE_SIZE, PI05Config
 
@@ -720,8 +720,6 @@ class PI05Policy(PreTrainedPolicy):
     def __init__(
         self,
         config: PI05Config,
-        *,
-        _init_on_meta: bool = False,
         **kwargs,
     ):
         """
@@ -735,22 +733,13 @@ class PI05Policy(PreTrainedPolicy):
 
         # Initialize the core PI05 model
         self.init_rtc_processor()
-        if _init_on_meta:
-            require_package("accelerate", extra="pi")
-            from accelerate import init_empty_weights
-
-            # Keep small deterministic/non-persistent buffers on CPU while placing only parameters on meta.
-            with init_empty_weights(include_buffers=False):
-                self.model = PI05Pytorch(config, rtc_processor=self.rtc_processor)
-        else:
-            self.model = PI05Pytorch(config, rtc_processor=self.rtc_processor)
+        self.model = PI05Pytorch(config, rtc_processor=self.rtc_processor)
 
         # Enable gradient checkpointing if requested
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if not _init_on_meta:
-            self.model.to(config.device)
+        self.model.to(config.device)
 
         self.reset()
 
@@ -793,43 +782,83 @@ class PI05Policy(PreTrainedPolicy):
                 **kwargs,
             )
 
-        print(f"Loading model from: {pretrained_name_or_path}")
-        from transformers.utils import cached_file
+        # Initialize model without loading weights
+        # Check if dataset_stats were provided in kwargs
+        model = cls(config, **kwargs)
 
-        resolved_file = cached_file(
-            pretrained_name_or_path,
-            "model.safetensors",
-            cache_dir=cache_dir,
-            force_download=force_download,
-            resume_download=resume_download,
-            proxies=proxies,
-            token=token,
-            revision=revision,
-            local_files_only=local_files_only,
-        )
-        if resolved_file is None:
-            raise FileNotFoundError(f"model.safetensors not found in {pretrained_name_or_path}")
+        # Load state dict (expects keys with "model." prefix)
+        try:
+            print(f"Loading model from: {pretrained_name_or_path}")
+            try:
+                from transformers.utils import cached_file
 
-        model = cls(config, _init_on_meta=True, **kwargs)
+                resolved_file = cached_file(
+                    pretrained_name_or_path,
+                    "model.safetensors",
+                    cache_dir=kwargs.get("cache_dir"),
+                    force_download=kwargs.get("force_download", False),
+                    resume_download=kwargs.get("resume_download"),
+                    proxies=kwargs.get("proxies"),
+                    token=kwargs.get("token"),
+                    revision=kwargs.get("revision"),
+                    local_files_only=kwargs.get("local_files_only", False),
+                )
+                from safetensors.torch import load_file
 
-        def remap_state_dict(original_state_dict):
+                original_state_dict = load_file(resolved_file)
+                print("✓ Loaded state dict from model.safetensors")
+            except Exception as e:
+                print(f"Could not load state dict from remote files: {e}")
+                print("Returning model without loading pretrained weights")
+                return model
+
+            # First, fix any key differences (see openpi model.py, _fix_pytorch_state_dict_keys)
             fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
-            remapped_state_dict = {}
-            for key, value in fixed_state_dict.items():
-                new_key = key if key.startswith("model.") else f"model.{key}"
-                remapped_state_dict[new_key] = value
-            return remapped_state_dict
 
-        load_safetensors_into_meta_model(
-            model,
-            resolved_file,
-            config.device,
-            strict=strict,
-            remap_state_dict=remap_state_dict,
-        )
-        model.to(config.device)
-        model.eval()
-        print("✓ Loaded model.safetensors directly into model parameters")
+            # Then add "model." prefix for all keys that don't already have it
+            remapped_state_dict = {}
+            remap_count = 0
+
+            for key, value in fixed_state_dict.items():
+                if not key.startswith("model."):
+                    new_key = f"model.{key}"
+                    remapped_state_dict[new_key] = value
+                    remap_count += 1
+                else:
+                    remapped_state_dict[key] = value
+
+            if remap_count > 0:
+                print(f"Remapped {remap_count} state dict keys")
+
+            # Load the remapped state dict into the model
+            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+
+            if missing_keys:
+                print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
+                if len(missing_keys) <= 5:
+                    for key in missing_keys:
+                        print(f"  - {key}")
+                else:
+                    for key in missing_keys[:5]:
+                        print(f"  - {key}")
+                    print(f"  ... and {len(missing_keys) - 5} more")
+
+            if unexpected_keys:
+                print(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
+                if len(unexpected_keys) <= 5:
+                    for key in unexpected_keys:
+                        print(f"  - {key}")
+                else:
+                    for key in unexpected_keys[:5]:
+                        print(f"  - {key}")
+                    print(f"  ... and {len(unexpected_keys) - 5} more")
+
+            if not missing_keys and not unexpected_keys:
+                print("All keys loaded successfully!")
+
+        except Exception as e:
+            print(f"Warning: Could not load state dict: {e}")
+
         return model
 
     def _fix_pytorch_state_dict_keys(
@@ -888,7 +917,7 @@ class PI05Policy(PreTrainedPolicy):
             ):
                 fixed_state_dict[
                     "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
-                ] = value
+                ] = value.clone()
 
             fixed_state_dict[new_key] = value
 

@@ -666,6 +666,21 @@ def create_app():
         except RuntimeError as error:
             raise HTTPException(409, str(error)) from error
 
+    @app.post("/api/runtime/hardware/release")
+    def runtime_hardware_release():
+        try:
+            return runtime.release_hardware_session()
+        except RuntimeError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @app.post("/api/runtime/hardware/prepare")
+    def runtime_hardware_prepare(body: CollectionStartRequest):
+        try:
+            close_piper_session()
+            return runtime.prepare_collection_hardware(body)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise HTTPException(409, str(error)) from error
+
     @app.post("/api/runtime/replay/start")
     def runtime_replay_start(body: ReplayStartRequest):
         try:

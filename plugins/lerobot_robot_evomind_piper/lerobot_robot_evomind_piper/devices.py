@@ -47,7 +47,7 @@ class PiperXFollowerConfigBase:
     speed_ratio: int = 100
     high_follow: bool = True
     enable_on_connect: bool = True
-    enable_timeout_s: float = 10.0
+    enable_timeout_s: float = 3.0
     sync_gripper: bool = True
     gripper_effort_default: int = 1000
     gripper_status_code: int = 0x01
@@ -90,7 +90,7 @@ class PiperXLeaderConfigBase:
     command_speed_ratio: int = 100
     command_high_follow: bool = True
     mode_refresh_interval_s: float = 1.0
-    enable_timeout_s: float = 10.0
+    enable_timeout_s: float = 3.0
     disable_on_disconnect: bool = False
 
 
@@ -185,15 +185,10 @@ class PiperXFollower(Robot):
                 time.sleep(self.config.startup_sleep_s)
             self._is_connected = True
             self.configure()
-            if self.config.enable_on_connect:
-                if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
-                    raise RuntimeError(
-                        f"[{self.config.port}] Piper follower did not enable within "
-                        f"{self.config.enable_timeout_s:.1f} seconds."
-                    )
-                # Enabling can reset the controller's motion mode. Re-apply the
-                # follower role and control mode only after enable is confirmed.
-                self.configure()
+            if self.config.enable_on_connect and not wait_enable_piper(
+                self.arm, self.config.enable_timeout_s
+            ):
+                logger.warning("Piper follower did not report enabled state before timeout.")
             for camera in self.cameras.values():
                 camera.connect()
                 connected_cameras.append(camera)
@@ -396,20 +391,11 @@ class PiperXLeader(Teleoperator):
         else:
             self._manual_action = None
             set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-            # Master/slave role changes are asynchronous on Piper. Wait for the
-            # controller to start follower feedback before enabling it.
-            time.sleep(max(0.5, self.config.startup_sleep_s))
-            if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
-                try:
-                    set_piper_role(self.arm, PIPER_ROLE_LEADER)
-                finally:
-                    self._manual_control_enabled = None
-                raise RuntimeError(
-                    f"[{self.config.port}] Piper leader did not enable within "
-                    f"{self.config.enable_timeout_s:.1f} seconds after switching to follower role."
-                )
-            set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
             self._send_command_mode()
+            if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
+                raise RuntimeError(
+                    f"[{self.config.port}] Piper leader did not enable after switching to follower role."
+                )
             if self.config.sync_gripper:
                 self._set_gripper_enabled(True)
         self._manual_control_enabled = enabled
@@ -686,23 +672,16 @@ class _PiperLeaderProcessProxy:
         self._parent_conn = parent_connection
         self._process = process
 
-    def _begin_call(self, command: str, *args, **kwargs) -> None:
+    def _call(self, command: str, *args, **kwargs):
         self._ensure_process()
         assert self._parent_conn is not None
         self._parent_conn.send({"command": command, "args": args, "kwargs": kwargs})
-
-    def _finish_call(self, command: str):
-        assert self._parent_conn is not None
         response = self._parent_conn.recv()
         if response["ok"]:
             return response.get("result")
         raise RuntimeError(
             f"bi_piper leader worker command '{command}' failed: {response['error']}\n{response['traceback']}"
         )
-
-    def _call(self, command: str, *args, **kwargs):
-        self._begin_call(command, *args, **kwargs)
-        return self._finish_call(command)
 
     def connect(self) -> None:
         try:
@@ -827,21 +806,8 @@ class BiPiperXLeader(Teleoperator):
 
     @check_if_not_connected
     def set_manual_control(self, enabled: bool) -> None:
-        if enabled:
-            self.left_arm.set_manual_control(True)
-            self.right_arm.set_manual_control(True)
-            return
-        try:
-            self.left_arm.set_manual_control(False)
-            self.right_arm.set_manual_control(False)
-        except Exception:
-            # Treat bimanual handover as one transaction. Never leave only one
-            # leader torqued when the other side failed to switch.
-            with suppress(Exception):
-                self.left_arm.set_manual_control(True)
-            with suppress(Exception):
-                self.right_arm.set_manual_control(True)
-            raise
+        self.left_arm.set_manual_control(enabled)
+        self.right_arm.set_manual_control(enabled)
 
     def enable_torque(self) -> None:
         """Put both leaders in command mode for smooth policy-to-human handover."""
@@ -854,31 +820,8 @@ class BiPiperXLeader(Teleoperator):
     @check_if_not_connected
     def get_action(self) -> RobotAction:
         action: RobotAction = {}
-        if isinstance(self.left_arm, _PiperLeaderProcessProxy) and isinstance(
-            self.right_arm, _PiperLeaderProcessProxy
-        ):
-            # Submit both reads before waiting so the two isolated SDK workers
-            # run concurrently, matching Studio's per-bus ownership without
-            # giving up the process isolation required by piper_sdk.
-            self.left_arm._begin_call("get_action")
-            self.right_arm._begin_call("get_action")
-            results: list[RobotAction | None] = []
-            errors: list[Exception] = []
-            for arm in (self.left_arm, self.right_arm):
-                try:
-                    results.append(arm._finish_call("get_action"))
-                except Exception as error:
-                    results.append(None)
-                    errors.append(error)
-            if errors:
-                raise errors[0]
-            left_action, right_action = results
-            assert left_action is not None and right_action is not None
-        else:
-            left_action = self.left_arm.get_action()
-            right_action = self.right_arm.get_action()
-        action.update({f"left_{key}": value for key, value in left_action.items()})
-        action.update({f"right_{key}": value for key, value in right_action.items()})
+        action.update({f"left_{key}": value for key, value in self.left_arm.get_action().items()})
+        action.update({f"right_{key}": value for key, value in self.right_arm.get_action().items()})
         return action
 
     @check_if_not_connected

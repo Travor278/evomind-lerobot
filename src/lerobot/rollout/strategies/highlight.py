@@ -25,6 +25,7 @@ from threading import Event as ThreadingEvent, Lock
 from lerobot.datasets import VideoEncodingManager
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.utils.hardware_recovery import hardware_frame
 from lerobot.utils.keyboard_input import create_key_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import (
@@ -124,87 +125,90 @@ class HighlightStrategy(RolloutStrategy):
         with VideoEncodingManager(dataset):
             try:
                 while not ctx.runtime.shutdown_event.is_set():
-                    loop_start = time.perf_counter()
+                    with hardware_frame(
+                        "rollout", self._on_hardware_recovered, self._on_hardware_interrupted
+                    ):
+                        loop_start = time.perf_counter()
 
-                    if "toggle_highlight" in take_runtime_commands():
-                        self._save_requested.set()
+                        if "toggle_highlight" in take_runtime_commands():
+                            self._save_requested.set()
 
-                    if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
-                        logger.info("Duration limit reached (%.0fs)", cfg.duration)
-                        break
+                        if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
+                            logger.info("Duration limit reached (%.0fs)", cfg.duration)
+                            break
 
-                    obs = robot.get_observation()
-                    obs_processed = self._process_observation_and_notify(ctx.processors, obs)
+                        obs = robot.get_observation()
+                        obs_processed = self._process_observation_and_notify(ctx.processors, obs)
 
-                    if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
-                        continue
+                        if self._handle_warmup(cfg.use_torch_compile, loop_start, control_interval):
+                            continue
 
-                    action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
+                        action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
 
-                    if action_dict is not None:
-                        self._log_telemetry(obs_processed, action_dict, ctx.runtime)
-                        obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
-                        action_frame = build_dataset_frame(features, action_dict, prefix=ACTION)
-                        frame = {**obs_frame, **action_frame, "task": task_str}
+                        if action_dict is not None:
+                            self._log_telemetry(obs_processed, action_dict, ctx.runtime)
+                            obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
+                            action_frame = build_dataset_frame(features, action_dict, prefix=ACTION)
+                            frame = {**obs_frame, **action_frame, "task": task_str}
 
-                        # NOTE: ``is_set()`` then ``clear()`` is not atomic
-                        # against the keyboard thread setting the flag again
-                        # in between — but that is benign: we lose at most one
-                        # toggle, processed on the next iteration.
-                        if self._save_requested.is_set():
-                            self._save_requested.clear()
-                            if not self._recording_live.is_set():
-                                logger.info(
-                                    "Flushing ring buffer (%d frames) + starting live recording",
-                                    len(ring),
-                                )
-                                for buffered_frame in ring.drain():
-                                    dataset.add_frame(buffered_frame)
-                                self._recording_live.set()
-                                emit_runtime_event(
-                                    "rollout",
-                                    "running",
-                                    strategy="highlight",
-                                    rollout_phase="recording",
-                                    records_data=True,
-                                )
-                            else:
+                            # NOTE: ``is_set()`` then ``clear()`` is not atomic
+                            # against the keyboard thread setting the flag again
+                            # in between — but that is benign: we lose at most one
+                            # toggle, processed on the next iteration.
+                            if self._save_requested.is_set():
+                                self._save_requested.clear()
+                                if not self._recording_live.is_set():
+                                    logger.info(
+                                        "Flushing ring buffer (%d frames) + starting live recording",
+                                        len(ring),
+                                    )
+                                    for buffered_frame in ring.drain():
+                                        dataset.add_frame(buffered_frame)
+                                    self._recording_live.set()
+                                    emit_runtime_event(
+                                        "rollout",
+                                        "running",
+                                        strategy="highlight",
+                                        rollout_phase="recording",
+                                        records_data=True,
+                                    )
+                                else:
+                                    dataset.add_frame(frame)
+                                    with self._episode_lock:
+                                        save_episode_and_emit(dataset, ctx, strategy="highlight")
+                                    logger.info("Episode saved (total: %d)", dataset.num_episodes)
+                                    log_say(
+                                        f"Episode {dataset.num_episodes} saved",
+                                        play_sounds,
+                                    )
+                                    self._recording_live.clear()
+                                    emit_runtime_event(
+                                        "rollout",
+                                        "running",
+                                        strategy="highlight",
+                                        rollout_phase="buffering",
+                                        records_data=True,
+                                        saved_episodes=dataset.num_episodes,
+                                    )
+                                    continue  # frame already consumed — skip ring.append
+
+                            if self._push_requested.is_set():
+                                self._push_requested.clear()
+                                logger.info("Push requested by user")
+                                self._background_push(dataset, cfg)
+
+                            if self._recording_live.is_set():
                                 dataset.add_frame(frame)
-                                with self._episode_lock:
-                                    save_episode_and_emit(dataset, ctx, strategy="highlight")
-                                logger.info("Episode saved (total: %d)", dataset.num_episodes)
-                                log_say(
-                                    f"Episode {dataset.num_episodes} saved",
-                                    play_sounds,
-                                )
-                                self._recording_live.clear()
-                                emit_runtime_event(
-                                    "rollout",
-                                    "running",
-                                    strategy="highlight",
-                                    rollout_phase="buffering",
-                                    records_data=True,
-                                    saved_episodes=dataset.num_episodes,
-                                )
-                                continue  # frame already consumed — skip ring.append
+                            else:
+                                ring.append(frame)
 
-                        if self._push_requested.is_set():
-                            self._push_requested.clear()
-                            logger.info("Push requested by user")
-                            self._background_push(dataset, cfg)
-
-                        if self._recording_live.is_set():
-                            dataset.add_frame(frame)
+                        dt = time.perf_counter() - loop_start
+                        if (sleep_t := control_interval - dt) > 0:
+                            precise_sleep(sleep_t)
                         else:
-                            ring.append(frame)
-
-                    dt = time.perf_counter() - loop_start
-                    if (sleep_t := control_interval - dt) > 0:
-                        precise_sleep(sleep_t)
-                    else:
-                        logger.warning(
-                            f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({cfg.fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
-                        )
+                            logger.warning(
+                                f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({cfg.fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+                            )
 
             finally:
                 logger.info("Highlight control loop ended")

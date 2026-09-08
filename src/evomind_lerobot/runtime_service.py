@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import multiprocessing
 import os
 import re
 import signal
 import sqlite3
-import subprocess
-import sys
 import threading
 from pathlib import Path
 from queue import Empty
@@ -28,18 +25,8 @@ from evomind_lerobot.device_config import (
     load_device_configuration,
     runtime_id,
 )
-from evomind_lerobot.discovery import hardware_inventory
 from evomind_lerobot.events import EventBroker, Operation, Phase
 from evomind_lerobot.jobs import HardwareBusyError, JobManager
-from evomind_lerobot.policy_runtime import (
-    RUNTIME_MANIFEST_NAME,
-    PolicyRuntimeManifest,
-    RuntimeLaunchSpec,
-    capture_training_environment,
-    load_runtime_manifest,
-    runtime_launch_spec,
-    validate_active_runtime,
-)
 from evomind_lerobot.workspace import datasets_inventory, policies_inventory
 
 
@@ -88,7 +75,7 @@ class RolloutStartRequest(BaseModel):
     episode_time_s: int = Field(default=30, ge=1, le=86_400)
     reset_time_s: int = Field(default=10, ge=0, le=86_400)
     ring_buffer_seconds: int = Field(default=10, ge=1, le=300)
-    return_to_initial_position: bool = True
+    return_to_initial_position: bool = False
 
 
 class PolicyInspectRequest(BaseModel):
@@ -143,97 +130,6 @@ _MESSAGES = {
     ("replay", "stopping"): "正在停止回放",
     ("replay", "completed"): "回放已结束",
 }
-
-_SPAWN_ENVIRONMENT_LOCK = threading.Lock()
-
-
-def _runtime_interpreter_sys_path(launch: RuntimeLaunchSpec) -> list[str]:
-    """Resolve import paths from the selected interpreter, not from the web-service process.
-
-    ``multiprocessing`` spawn normally serializes the parent's ``sys.path`` and installs it in the child even
-    after ``set_executable`` selects another Python. That can make a worker started with a PyTorch 2.11
-    interpreter import the parent service's PyTorch 2.10 site-packages.
-    """
-    environment = os.environ.copy()
-    environment.update(launch.environment_variables)
-    result = subprocess.run(  # noqa: S603 - executable is the validated checkpoint runtime
-        [
-            launch.python_executable,
-            "-c",
-            "import json, sys; print(json.dumps(sys.path))",
-        ],
-        cwd=launch.working_directory or None,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    try:
-        paths = json.loads(result.stdout.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as error:
-        raise RuntimeError("Selected runtime did not report a valid Python import path") from error
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        raise RuntimeError("Selected runtime reported an invalid Python import path")
-    return paths
-
-
-def _start_process(process: multiprocessing.Process, launch: RuntimeLaunchSpec | None = None) -> None:
-    """Start a spawn process with a checkpoint-selected interpreter and environment."""
-    if launch is None:
-        process.start()
-        return
-    from multiprocessing import spawn
-
-    runtime_sys_path = _runtime_interpreter_sys_path(launch)
-    original_executable = spawn.get_executable()
-    original_directory = Path.cwd()
-    original_sys_path = sys.path.copy()
-    missing = object()
-    previous_environment: dict[str, str | object] = {
-        key: os.environ.get(key, missing) for key in launch.environment_variables
-    }
-    with _SPAWN_ENVIRONMENT_LOCK:
-        try:
-            multiprocessing.set_executable(launch.python_executable)
-            os.environ.update(launch.environment_variables)
-            if launch.working_directory:
-                os.chdir(launch.working_directory)
-            sys.path[:] = runtime_sys_path
-            process.start()
-        finally:
-            multiprocessing.set_executable(original_executable)
-            os.chdir(original_directory)
-            sys.path[:] = original_sys_path
-            for key, value in previous_environment.items():
-                if value is missing:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = str(value)
-
-
-def _policy_runtime_manifest(policy_path: str) -> PolicyRuntimeManifest | None:
-    checkpoint = Path(policy_path)
-    if not (checkpoint / RUNTIME_MANIFEST_NAME).is_file():
-        return None
-    return load_runtime_manifest(checkpoint)
-
-
-def _apply_policy_runtime_settings(policy_config: Any, manifest: PolicyRuntimeManifest | None) -> None:
-    if manifest is None:
-        return
-    settings = manifest.inference
-    for name, value in (
-        ("device", settings.device),
-        ("dtype", settings.precision),
-        ("compile_model", settings.torch_compile.enabled),
-        ("compile_mode", settings.torch_compile.mode),
-        (
-            "attn_implementation",
-            settings.attention_backend if settings.attention_backend != "checkpoint" else None,
-        ),
-    ):
-        if value is not None and hasattr(policy_config, name):
-            setattr(policy_config, name, value)
 
 
 class ProcessRuntimeBridge:
@@ -315,7 +211,10 @@ def _camera_config(binding: CameraBinding, fps: int) -> dict[str, Any]:
         "fps": min(fps, 30),
         "width": 640,
         "height": 480,
-        "warmup_s": 3,
+        # LeRobot's OpenCV default is one second. Cameras are connected
+        # sequentially, so a three-second value adds roughly nine seconds for
+        # this workstation's three-camera setup before inference can start.
+        "warmup_s": 1,
         "fourcc": "MJPG",
     }
 
@@ -395,21 +294,6 @@ def _configured_visual_features(configuration: DeviceConfiguration) -> set[str]:
         f"observation.images.{_configured_camera_feature_name(configuration, camera)}"
         for camera in configuration.camera_bindings
     }
-
-
-def _offline_camera_aliases(
-    configuration: DeviceConfiguration,
-    inventory: dict[str, Any],
-) -> list[str]:
-    cameras = inventory.get("cameras", [])
-    available_ids = {str(camera.get("id") or camera.get("path") or "") for camera in cameras}
-    available_serials = {str(camera.get("serial_number") or "") for camera in cameras}
-    return sorted(
-        binding.alias
-        for binding in configuration.camera_bindings
-        if binding.id not in available_ids
-        and (not binding.serial_number or binding.serial_number not in available_serials)
-    )
 
 
 def _configured_vector_dimensions(configuration: DeviceConfiguration) -> tuple[int | None, int | None]:
@@ -562,8 +446,6 @@ def _execute_teleoperation(payload: dict[str, Any]) -> None:
             teleop=teleop,
             fps=request.fps,
             display_data=False,
-            read_observation=False,
-            print_loop_timing=False,
         )
     )
 
@@ -639,9 +521,6 @@ def inspect_policy_compatibility(request: PolicyInspectRequest) -> dict[str, Any
         issues.append(f"状态维度不匹配：模型 {state_dim}，设备 {hardware_state_dim}")
     if hardware_action_dim is not None and action_dim is not None and hardware_action_dim != action_dim:
         issues.append(f"动作维度不匹配：模型 {action_dim}，设备 {hardware_action_dim}")
-    offline_cameras = _offline_camera_aliases(configuration, hardware_inventory())
-    if offline_cameras:
-        issues.append(f"摄像头未连接：{', '.join(offline_cameras)}")
 
     revision: str | None = None
     size_bytes: int | None = None
@@ -668,21 +547,28 @@ def inspect_policy_compatibility(request: PolicyInspectRequest) -> dict[str, Any
         "hardware_action_dim": hardware_action_dim,
         "expected_visuals": sorted(expected_visuals),
         "provided_visuals": sorted(provided_visuals),
-        "offline_cameras": offline_cameras,
         "rename_map": rename_map,
-        "supports_rtc": policy.type in {"pi0", "pi05", "pi0_fast"},
+        "supports_rtc": policy.type in {"pi0", "pi05", "pi0_fast"}
+        or bool(getattr(policy, "rtc_enabled", False)),
         "compatible": not issues,
         "issues": issues,
     }
 
 
-def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = None) -> None:
+def _execute_rollout(
+    payload: dict[str, Any],
+    *,
+    preloaded_policy: Any | None = None,
+    hardware_session: Any | None = None,
+    keep_hardware_connected: bool = False,
+) -> Any | None:
     from lerobot.configs import PreTrainedConfig
     from lerobot.configs.dataset import DatasetRecordConfig
     from lerobot.configs.video import RGBEncoderConfig
     from lerobot.rollout import context as rollout_context
     from lerobot.rollout.configs import (
         BaseStrategyConfig,
+        DAggerPedalConfig,
         DAggerStrategyConfig,
         EpisodicDAggerStrategyConfig,
         EpisodicStrategyConfig,
@@ -690,10 +576,9 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         RolloutConfig,
         SentryStrategyConfig,
     )
-    from lerobot.scripts.lerobot_rollout import rollout
+    from lerobot.scripts.lerobot_rollout import run_rollout
 
     request = RolloutStartRequest.model_validate(payload)
-    manifest = validate_active_runtime(Path(request.policy_path))
     configuration = _configuration()
     inspection = inspect_policy_compatibility(PolicyInspectRequest(policy_path=request.policy_path))
     if not inspection["compatible"]:
@@ -710,11 +595,17 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         request.fps,
         include_teleoperator=needs_teleop,
     )
+    hardware_key = (repr(robot), repr(teleop))
+    connected_hardware = None
+    if hardware_session is not None:
+        if hardware_session.get("key") == hardware_key:
+            connected_hardware = hardware_session.get("hardware")
+        else:
+            logging.info("Hardware configuration changed; releasing the previous resident session")
+            _disconnect_hardware_session(hardware_session)
     policy_path = _policy_path(request.policy_path)
     policy = PreTrainedConfig.from_pretrained(policy_path)
     policy.pretrained_path = policy_path
-    manifest = manifest or _policy_runtime_manifest(policy_path)
-    _apply_policy_runtime_settings(policy, manifest)
 
     dataset = None
     if request.strategy != "base":
@@ -732,6 +623,19 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
             rgb_encoder=RGBEncoderConfig(vcodec="h264"),
         )
 
+    pedal_device = os.environ.get("EVOMIND_DAGGER_PEDAL_DEVICE", "").strip()
+    dagger_input = (
+        {
+            "input_device": "pedal",
+            "pedal": DAggerPedalConfig(
+                device_path=pedal_device,
+                intervention=os.environ.get("EVOMIND_DAGGER_PEDAL_KEY", "*").strip() or "*",
+            ),
+        }
+        if pedal_device
+        else {}
+    )
+
     strategy = {
         "base": BaseStrategyConfig(),
         "episodic": EpisodicStrategyConfig(),
@@ -740,13 +644,16 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         "dagger_corrections": DAggerStrategyConfig(
             num_episodes=request.num_episodes,
             record_autonomous=False,
+            **dagger_input,
         ),
         "dagger_continuous": DAggerStrategyConfig(
             num_episodes=request.num_episodes,
             record_autonomous=True,
+            **dagger_input,
         ),
         "episodic_dagger": EpisodicDAggerStrategyConfig(
             num_episodes=request.num_episodes,
+            **dagger_input,
         ),
     }[request.strategy]
     inference = _rollout_inference_config(request.inference, policy)
@@ -764,23 +671,23 @@ def _execute_rollout(payload: dict[str, Any], *, preloaded_policy: Any | None = 
         return_to_initial_position=request.return_to_initial_position,
         display_data=False,
         play_sounds=False,
-        device=manifest.inference.device if manifest else None,
-        use_torch_compile=manifest.inference.torch_compile.enabled if manifest else False,
-        torch_compile_backend=(manifest.inference.torch_compile.backend or "inductor")
-        if manifest
-        else "inductor",
-        torch_compile_mode=(manifest.inference.torch_compile.mode or "default") if manifest else "default",
     )
-    if preloaded_policy is None:
-        rollout(rollout_config)
-        return
-
-    original_loader = rollout_context._load_pretrained_policy
-    rollout_context._load_pretrained_policy = lambda _config: preloaded_policy
+    original_loader = None
+    if preloaded_policy is not None:
+        original_loader = rollout_context._load_pretrained_policy
+        rollout_context._load_pretrained_policy = lambda _config: preloaded_policy
     try:
-        rollout(rollout_config)
+        hardware = run_rollout(
+            rollout_config,
+            connected_hardware=connected_hardware,
+            keep_hardware_connected=keep_hardware_connected,
+        )
     finally:
-        rollout_context._load_pretrained_policy = original_loader
+        if original_loader is not None:
+            rollout_context._load_pretrained_policy = original_loader
+    if keep_hardware_connected and hardware is not None:
+        return {"key": hardware_key, "hardware": hardware}
+    return None
 
 
 def _rollout_inference_config(backend: Literal["sync", "rtc"], policy_config: Any) -> Any:
@@ -794,10 +701,12 @@ def _rollout_inference_config(backend: Literal["sync", "rtc"], policy_config: An
     chunk_size = int(getattr(policy_config, "chunk_size", 20))
     if chunk_size <= 0:
         raise ValueError(f"Policy chunk_size must be positive, got {chunk_size}")
+    execution_horizon = int(getattr(policy_config, "rtc_execution_horizon", min(20, chunk_size)))
+    max_guidance_weight = float(getattr(policy_config, "rtc_max_guidance_weight", 5.0))
     return RTCInferenceConfig(
         rtc=RTCConfig(
-            execution_horizon=min(20, chunk_size),
-            max_guidance_weight=5.0,
+            execution_horizon=min(execution_horizon, chunk_size),
+            max_guidance_weight=max_guidance_weight,
         ),
         queue_threshold=min(30, chunk_size - 1),
     )
@@ -868,8 +777,6 @@ def _run_workflow(
 
 def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     """Load one local policy and keep it on its configured accelerator."""
-    manifest = validate_active_runtime(Path(policy_path))
-
     import torch
 
     from lerobot import policies as _policy_configs  # noqa: F401
@@ -881,8 +788,6 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     register_third_party_plugins()
     policy_config = PreTrainedConfig.from_pretrained(policy_path)
     policy_config.pretrained_path = policy_path
-    manifest = manifest or _policy_runtime_manifest(policy_path)
-    _apply_policy_runtime_settings(policy_config, manifest)
     configured_device = policy_config.device
     device = (
         configured_device
@@ -891,33 +796,99 @@ def _load_resident_policy(policy_path: str) -> tuple[Any, dict[str, Any]]:
     )
     policy = _load_pretrained_policy(policy_config).to(device)
     policy.eval()
+    warmup_details = _warmup_resident_policy(policy, policy_config)
     allocated_bytes = torch.cuda.memory_allocated() if str(device).startswith("cuda") else None
-    runtime_versions = (
-        capture_training_environment(manifest.framework, source="validated_inference").model_dump(
-            mode="json"
-        )
-        if manifest
-        else None
-    )
     return policy, {
         "policy_path": policy_path,
         "policy_type": policy_config.type,
         "device": str(device),
         "allocated_bytes": allocated_bytes,
-        **(
-            {
-                "runtime_environment_kind": manifest.environment.kind,
-                "runtime_environment_reference": manifest.environment.reference,
-                "runtime_framework": manifest.framework,
-                "runtime_versions": runtime_versions,
-                "precision": manifest.inference.precision,
-                "attention_backend": manifest.inference.attention_backend,
-                "torch_compile": manifest.inference.torch_compile.model_dump(mode="json"),
-            }
-            if manifest
-            else {}
-        ),
+        **warmup_details,
     }
+
+
+def _warmup_resident_policy(policy: Any, policy_config: Any) -> dict[str, Any]:
+    """Make a resident OpenPI JAX policy inference-ready before reporting it loaded.
+
+    OpenPI compiles lazily on its first request.  Warming both the plain and RTC
+    request paths here keeps that compilation out of the hardware rollout and
+    guarantees that a successful preload has already produced valid actions.
+    Dummy observations never reach the robot.
+    """
+    if getattr(policy_config, "type", None) != "openpi_jax":
+        return {}
+
+    import time
+
+    import torch
+
+    from lerobot.configs import FeatureType
+    from lerobot.utils.constants import OBS_STATE
+
+    batch: dict[str, Any] = {"task": [str(getattr(policy_config, "prompt", ""))]}
+    for key, feature in policy_config.input_features.items():
+        shape = tuple(feature.shape)
+        if feature.type == FeatureType.VISUAL:
+            batch[key] = torch.zeros((1, *shape), dtype=torch.uint8)
+        elif key == OBS_STATE:
+            batch[key] = torch.zeros((1, *shape), dtype=torch.float32)
+
+    if OBS_STATE not in batch:
+        raise ValueError(f"OpenPI JAX warmup requires {OBS_STATE}")
+
+    started = time.perf_counter()
+    actions = policy.predict_action_chunk(batch)
+    warmup_inferences = 1
+
+    if bool(getattr(policy_config, "rtc_enabled", False)):
+        execution_horizon = max(1, int(getattr(policy_config, "rtc_execution_horizon", 1)))
+        prefix = actions[0, :execution_horizon]
+        policy.predict_action_chunk(
+            batch,
+            inference_delay=0,
+            prev_chunk_left_over=prefix,
+        )
+        warmup_inferences += 1
+
+    policy.reset()
+    warmup_s = time.perf_counter() - started
+    logging.info(
+        "Resident OpenPI JAX policy warmed up (%d inference paths in %.2fs)",
+        warmup_inferences,
+        warmup_s,
+    )
+    server_metadata = getattr(getattr(policy, "_client", None), "metadata", {})
+    model_load = server_metadata.get("evomind_load") if isinstance(server_metadata, dict) else None
+    return {
+        "inference_ready": True,
+        "warmup_inferences": warmup_inferences,
+        "warmup_s": round(warmup_s, 3),
+        **({"model_load": dict(model_load)} if isinstance(model_load, dict) else {}),
+    }
+
+
+def _stop_external_policy_server(policy_path: str) -> None:
+    """Stop the external server explicitly owned by a local policy config."""
+    import json
+    import subprocess
+
+    config_path = Path(policy_path) / "config.json"
+    if not config_path.is_file():
+        return
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("type") != "openpi_jax":
+        return
+
+    command = config.get("server_stop_command") or []
+    if not command:
+        logging.warning("OpenPI JAX policy has no server_stop_command: %s", policy_path)
+        return
+    if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
+        raise ValueError("OpenPI JAX server_stop_command must be a non-empty string list")
+
+    timeout_s = float(config.get("server_stop_timeout_s", 30.0))
+    logging.info("Stopping resident OpenPI JAX server: %s", command)
+    subprocess.run(command, check=True, timeout=timeout_s)
 
 
 def _run_policy_resident(
@@ -926,7 +897,7 @@ def _run_policy_resident(
     control_queue: Any,
     command_queue: Any,
 ) -> None:
-    """Own a GPU policy across multiple independent rollout sessions."""
+    """Own a GPU policy and an optional connected collection hardware session."""
     from lerobot.utils.runtime_bridge import use_runtime_bridge
 
     try:
@@ -937,9 +908,11 @@ def _run_policy_resident(
     event_queue.put({"kind": "resident_ready", "details": details})
 
     bridge = ProcessRuntimeBridge(event_queue, command_queue)
+    hardware_session = None
     while True:
         message = control_queue.get()
         if message.get("kind") == "shutdown":
+            _disconnect_hardware_session(hardware_session)
             del policy
             try:
                 import torch
@@ -949,15 +922,174 @@ def _run_policy_resident(
             except Exception:
                 logging.info("Could not explicitly clear accelerator cache", exc_info=True)
             return
+        if message.get("kind") == "release_hardware":
+            _disconnect_hardware_session(hardware_session)
+            hardware_session = None
+            event_queue.put({"kind": "hardware_session", "ready": False})
+            continue
+        if message.get("kind") == "prepare_hardware":
+            try:
+                hardware_session = _prepare_hardware_session(
+                    fps=int(message["fps"]),
+                    include_teleoperator=bool(message["include_teleoperator"]),
+                    hardware_session=hardware_session,
+                )
+            except BaseException as error:
+                _disconnect_hardware_session(hardware_session)
+                hardware_session = None
+                event_queue.put(
+                    {
+                        "kind": "hardware_session",
+                        "ready": False,
+                        "error": str(error) or error.__class__.__name__,
+                    }
+                )
+            else:
+                event_queue.put({"kind": "hardware_session", "ready": True})
+            continue
         if message.get("kind") != "rollout":
             continue
+        keep_hardware = bool(message.get("keep_hardware"))
+        if hardware_session is not None and not keep_hardware:
+            _disconnect_hardware_session(hardware_session)
+            hardware_session = None
         try:
             with use_runtime_bridge(bridge):
-                _execute_rollout(message["payload"], preloaded_policy=policy)
+                hardware_session = _execute_rollout(
+                    message["payload"],
+                    preloaded_policy=policy,
+                    hardware_session=hardware_session,
+                    keep_hardware_connected=keep_hardware,
+                )
         except BaseException as error:
+            _disconnect_hardware_session(hardware_session)
+            hardware_session = None
+            event_queue.put({"kind": "hardware_session", "ready": False})
             event_queue.put({"kind": "job_exit", "error": str(error) or error.__class__.__name__})
         else:
+            event_queue.put({"kind": "hardware_session", "ready": hardware_session is not None})
             event_queue.put({"kind": "job_exit", "error": ""})
+
+
+def _release_collection_device(device: Any, *, preserve_pose: bool) -> None:
+    """Release partial serial devices without enabling/disabling torque on failure."""
+    if device is None:
+        return
+    if not preserve_pose:
+        if device.is_connected:
+            device.disconnect()
+        return
+
+    errors = []
+
+    def release(call):
+        try:
+            call()
+        except Exception as error:
+            errors.append(error)
+            logging.exception("Could not release part of a failed collection connection")
+
+    arms = [getattr(device, name, None) for name in ("left_arm", "right_arm")]
+    if any(arm is not None for arm in arms):
+        for arm in arms:
+            if arm is not None:
+                release(lambda arm=arm: _release_collection_device(arm, preserve_pose=True))
+    else:
+        bus = getattr(device, "bus", None)
+        if bus is not None:
+            if bus.is_connected:
+                release(lambda: bus.disconnect(disable_torque=False))
+            for camera in getattr(device, "cameras", {}).values():
+                if camera.is_connected:
+                    release(camera.disconnect)
+        elif device.is_connected:
+            release(device.disconnect)
+    if errors:
+        raise errors[0]
+
+
+def _disconnect_hardware_session(session: Any | None, *, failed_connection: bool = False) -> None:
+    """Release a cached robot/camera/teleoperator session; safe to call repeatedly."""
+    if session is None:
+        return
+    hardware = session.get("hardware") if isinstance(session, dict) else session
+    if hardware is None:
+        return
+    robot = hardware.robot_wrapper.inner
+    preserve_pose = failed_connection or getattr(robot, "motor_bus_recovery_failed", False) is True
+    try:
+        _release_collection_device(robot, preserve_pose=preserve_pose)
+    finally:
+        _release_collection_device(hardware.teleop, preserve_pose=preserve_pose)
+
+
+def _prepare_hardware_session(
+    *,
+    fps: int,
+    include_teleoperator: bool,
+    hardware_session: Any | None,
+) -> dict[str, Any]:
+    """Connect collection devices before recording so first action startup is immediate."""
+    from lerobot.robots import make_robot_from_config
+    from lerobot.rollout.context import HardwareContext
+    from lerobot.rollout.robot_wrapper import ThreadSafeRobot
+    from lerobot.teleoperators import make_teleoperator_from_config
+
+    configuration = _configuration()
+    robot_config, teleop_config = _decode_hardware(
+        configuration,
+        fps,
+        include_teleoperator=include_teleoperator,
+    )
+    hardware_key = (repr(robot_config), repr(teleop_config))
+    if hardware_session is not None and hardware_session.get("key") == hardware_key:
+        hardware = hardware_session.get("hardware")
+        robot = hardware.robot_wrapper.inner
+        teleop = hardware.teleop
+        robot_ready = bool(robot.is_connected)
+        teleop_ready = teleop_config is None or bool(teleop and teleop.is_connected)
+        if robot_ready and teleop_ready and getattr(robot, "motor_bus_recovery_failed", False) is not True:
+            try:
+                # Open handles alone do not prove the motor feedback still works.
+                robot.get_observation()
+            except (OSError, RuntimeError, ValueError):
+                logging.exception("Cached collection hardware failed its feedback check; rebuilding")
+                _disconnect_hardware_session(hardware_session, failed_connection=True)
+                hardware_session = None
+            else:
+                logging.info("Collection hardware session is already prepared and feedback is available")
+                return hardware_session
+
+    _disconnect_hardware_session(hardware_session)
+    logging.info("Preparing collection robot and cameras (%s)", robot_config.type)
+    robot = make_robot_from_config(robot_config)
+    teleop = None
+    try:
+        robot.connect()
+        initial_obs = robot.get_observation()
+        initial_position = {key: value for key, value in initial_obs.items() if key.endswith(".pos")}
+        if teleop_config is not None:
+            logging.info("Preparing collection teleoperator (%s)", teleop_config.type)
+            teleop = make_teleoperator_from_config(teleop_config)
+            teleop.connect()
+    except BaseException:
+        # Aggregate is_connected can be false while one arm, serial port, or
+        # camera is already open. Always unwind the components we constructed.
+        for device in (teleop, robot):
+            try:
+                _release_collection_device(device, preserve_pose=True)
+            except Exception:
+                logging.exception("Cleanup after collection prepare failed; retaining original connection error")
+        raise
+
+    hardware = HardwareContext(
+        robot_wrapper=ThreadSafeRobot(robot),
+        teleop=teleop,
+        initial_position=initial_position,
+        disconnect_on_teardown=False,
+    )
+    logging.info("Collection hardware session prepared")
+    return {"key": hardware_key, "hardware": hardware}
 
 
 class RuntimeService:
@@ -989,6 +1121,7 @@ class RuntimeService:
         self._resident_command_queue: Any = None
         self._resident_details: dict[str, Any] | None = None
         self._resident_loading_path: str | None = None
+        self._resident_hardware_ready = False
 
     @property
     def active_dataset_id(self) -> str | None:
@@ -1004,6 +1137,9 @@ class RuntimeService:
                 "operation": self._operation.value if self._operation else None,
                 "event": self._latest,
                 "policy_residency": self.policy_residency(),
+                "hardware_session": {
+                    "state": "ready" if self._resident_hardware_ready else "empty",
+                },
             }
 
     def policy_residency(self) -> dict[str, Any]:
@@ -1019,7 +1155,6 @@ class RuntimeService:
 
     def preload_policy(self, request: PolicyPreloadRequest) -> dict[str, Any]:
         policy_path = require_local_policy(request.policy_path)
-        launch = runtime_launch_spec(Path(policy_path))
         with self._lock:
             if self._operation is not None:
                 raise RuntimeError("请先结束当前运行任务")
@@ -1051,7 +1186,7 @@ class RuntimeService:
             self._resident_details = None
             self._resident_loading_path = policy_path
         try:
-            _start_process(process, launch)
+            process.start()
         except Exception:
             self._discard_resident(terminate=False)
             raise
@@ -1076,11 +1211,76 @@ class RuntimeService:
                 raise RuntimeError("请先结束正在使用该模型的任务")
             process = self._resident_process
             control_queue = self._resident_control_queue
+            policy_path = (self._resident_details or {}).get("policy_path")
         if process and process.is_alive() and control_queue is not None:
             control_queue.put({"kind": "shutdown"})
             process.join(timeout=10)
         self._discard_resident(terminate=bool(process and process.is_alive()))
+        if policy_path:
+            _stop_external_policy_server(policy_path)
         return self.policy_residency()
+
+    def release_hardware_session(self) -> dict[str, Any]:
+        """Disconnect idle collection hardware while keeping the policy resident."""
+        with self._lock:
+            if self._operation is not None:
+                raise RuntimeError("请先停止当前运行任务")
+            process = self._resident_process
+            control_queue = self._resident_control_queue
+            event_queue = self._resident_event_queue
+            ready = self._resident_hardware_ready
+        if not ready:
+            return {"state": "empty"}
+        if not process or not process.is_alive() or control_queue is None or event_queue is None:
+            with self._lock:
+                self._resident_hardware_ready = False
+            return {"state": "empty"}
+        control_queue.put({"kind": "release_hardware"})
+        try:
+            item = event_queue.get(timeout=15)
+        except Empty as error:
+            raise RuntimeError("设备会话释放超时") from error
+        if item.get("kind") != "hardware_session" or item.get("ready"):
+            raise RuntimeError("设备会话释放失败")
+        with self._lock:
+            self._resident_hardware_ready = False
+        return {"state": "empty"}
+
+    def prepare_collection_hardware(self, request: CollectionStartRequest) -> dict[str, Any]:
+        """Prepare the selected policy task's devices without starting inference or recording."""
+        if self._collection_store is None:
+            raise RuntimeError("采集进度账本未初始化")
+        task = self._collection_store.require_today_task(request.task_id)
+        if task["collection_method"] != "policy":
+            raise ValueError("人工采集任务不需要预连接 Policy 设备")
+        with self._lock:
+            if self._operation is not None:
+                raise RuntimeError("请先停止当前运行任务")
+            process = self._resident_process
+            control_queue = self._resident_control_queue
+            event_queue = self._resident_event_queue
+            resident_path = (self._resident_details or {}).get("policy_path")
+        local_policy = require_local_policy(task["policy_path"])
+        if not process or not process.is_alive() or resident_path != local_policy:
+            raise RuntimeError("请先把当前任务的 Policy 预加载到显存")
+        control_queue.put(
+            {
+                "kind": "prepare_hardware",
+                "fps": task["fps"],
+                "include_teleoperator": task["rollout_strategy"]
+                in {"episodic", "dagger_corrections", "dagger_continuous", "episodic_dagger"},
+            }
+        )
+        try:
+            item = event_queue.get(timeout=60)
+        except Empty as error:
+            raise RuntimeError("采集设备准备超时") from error
+        ready = item.get("kind") == "hardware_session" and bool(item.get("ready"))
+        with self._lock:
+            self._resident_hardware_ready = ready
+        if not ready:
+            raise RuntimeError(str(item.get("error") or "采集设备准备失败"))
+        return {"state": "ready"}
 
     def close(self) -> None:
         """Release a resident model when the local console shuts down."""
@@ -1088,10 +1288,16 @@ class RuntimeService:
             process = self._resident_process
             control_queue = self._resident_control_queue
             using_resident = self._using_resident
+            policy_path = (self._resident_details or {}).get("policy_path")
         if process and process.is_alive() and control_queue is not None and not using_resident:
             control_queue.put({"kind": "shutdown"})
             process.join(timeout=10)
         self._discard_resident(terminate=bool(process and process.is_alive()))
+        if policy_path and not using_resident:
+            try:
+                _stop_external_policy_server(policy_path)
+            except Exception:
+                logging.exception("Could not stop the resident policy server during shutdown")
 
     def _discard_resident(self, *, terminate: bool) -> None:
         with self._lock:
@@ -1106,6 +1312,7 @@ class RuntimeService:
             self._resident_command_queue = None
             self._resident_details = None
             self._resident_loading_path = None
+            self._resident_hardware_ready = False
 
     def start(self, operation: Operation, request: BaseModel) -> dict[str, Any]:
         if operation.value not in _EXECUTORS:
@@ -1154,9 +1361,9 @@ class RuntimeService:
         collection_task: dict[str, Any] | None,
     ) -> dict[str, Any]:
         payload = request.model_dump()
-        launch: RuntimeLaunchSpec | None = None
-        if operation is Operation.ROLLOUT:
-            launch = runtime_launch_spec(Path(str(payload["policy_path"])))
+        keep_hardware_session = bool(operation is Operation.ROLLOUT and collection_task is not None)
+        if not keep_hardware_session:
+            self.release_hardware_session()
         with self._lock:
             resident_path = (
                 (self._resident_details or {}).get("policy_path")
@@ -1231,9 +1438,15 @@ class RuntimeService:
             self._latest = self._events.latest.as_dict()
         try:
             if use_resident:
-                control_queue.put({"kind": "rollout", "payload": payload})
+                control_queue.put(
+                    {
+                        "kind": "rollout",
+                        "payload": payload,
+                        "keep_hardware": keep_hardware_session,
+                    }
+                )
             else:
-                _start_process(process, launch)
+                process.start()
         except Exception:
             self._clear()
             if collection_task is not None and self._collection_store is not None:
@@ -1286,6 +1499,10 @@ class RuntimeService:
             if item["kind"] in {"exit", "job_exit"}:
                 error = item["error"]
                 break
+            if item["kind"] == "hardware_session":
+                with self._lock:
+                    self._resident_hardware_ready = bool(item.get("ready"))
+                continue
             phase = Phase(item["phase"])
             message = _MESSAGES.get((item["operation"], item["phase"]), item["phase"])
             if tracked_collection and operation is Operation.ROLLOUT:
@@ -1296,6 +1513,13 @@ class RuntimeService:
                     "stopping": "正在停止 Policy 采集",
                     "completed": "Policy 采集已结束",
                 }.get(item["phase"], message)
+            recovery = item["data"].get("hardware_recovery")
+            if recovery == "retrying":
+                message = f"设备断联，正在重连（{item['data']['attempt']}/{item['data']['max_attempts']}）"
+            elif recovery == "recovered":
+                message = "连接已恢复，已丢弃断联帧并清空旧动作"
+            elif recovery == "failed":
+                message = "设备重连失败，本次运行已停止，断联帧未保存"
             event = self._events.publish(
                 Operation(item["operation"]),
                 phase,

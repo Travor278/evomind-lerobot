@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'EvoMind / LeRobot',
+  title: 'EvoMind · LeRobot',
   description: '本机 LeRobot 运行状态与设备',
 };
 

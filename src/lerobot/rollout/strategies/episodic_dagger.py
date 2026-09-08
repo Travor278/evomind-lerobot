@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,55 @@ from .core import save_episode_and_emit, send_next_action
 from .dagger import DAggerPhase, DAggerStrategy
 
 logger = logging.getLogger(__name__)
+
+
+class _EpisodeActivityGate:
+    """Retain a short pre-roll and open recording on sustained follower motion."""
+
+    def __init__(self, *, threshold: float, consecutive_frames: int, pre_roll_frames: int) -> None:
+        self.threshold = threshold
+        self.consecutive_frames = consecutive_frames
+        self._pending: deque[dict[str, Any]] = deque(maxlen=max(1, pre_roll_frames))
+        self._above_threshold = 0
+        self.total_frames_seen = 0
+        self.trimmed_frames = 0
+        self.active = False
+        self.just_activated = False
+
+    @staticmethod
+    def _state(frame: dict[str, Any]) -> np.ndarray:
+        value = frame["observation.state"]
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numpy"):
+            value = value.numpy()
+        return np.asarray(value, dtype=np.float32).reshape(-1)
+
+    def push(self, frame: dict[str, Any], *, force_start: bool = False) -> list[dict[str, Any]]:
+        self.just_activated = False
+        self.total_frames_seen += 1
+        if self.active:
+            return [frame]
+
+        state = self._state(frame)
+        # Compare against the oldest frame in the pre-roll window instead of
+        # the episode's initial pose. This detects actual recent motion while
+        # ignoring slow servo creep that can accumulate over a long warm-up.
+        reference = self._state(self._pending[0]) if self._pending else state
+        self._pending.append(frame)
+        displacement = float(np.max(np.abs(state - reference))) if state.size else 0.0
+        self._above_threshold = self._above_threshold + 1 if displacement >= self.threshold else 0
+        if not force_start and self._above_threshold < self.consecutive_frames:
+            return []
+
+        self.active = True
+        self.just_activated = True
+        ready = list(self._pending)
+        self._pending.clear()
+        self.trimmed_frames = max(0, self.total_frames_seen - len(ready))
+        return ready
 
 
 class EpisodicDAggerStrategy(DAggerStrategy):
@@ -60,7 +110,9 @@ class EpisodicDAggerStrategy(DAggerStrategy):
 
         recorded_episodes = 0
 
-        with VideoEncodingManager(dataset):
+        with VideoEncodingManager(dataset), ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="episodic-dagger-save"
+        ) as save_executor:
             try:
                 while (
                     recorded_episodes < dataset_cfg.num_episodes
@@ -78,31 +130,47 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                         break
 
                     should_reset = outcome == "rerecord" or recorded_episodes < dataset_cfg.num_episodes - 1
+                    has_frames = outcome != "rerecord" and self._episode_has_frames(dataset)
+                    save_future = None
 
                     if should_reset:
                         self._prepare_teleop_reset(ctx, last_action)
                         self._emit_reset_phase(recorded_episodes + 1, dataset_cfg.num_episodes)
-                        self._run_reset(
-                            ctx,
-                            duration_s=dataset_cfg.reset_time_s,
-                        )
+                        # Streaming encoding has already written nearly all video frames. Finish the
+                        # MP4 containers, parquet and metadata while the operator resets the scene,
+                        # rather than exposing that disk work as dead time before the next episode.
+                        if has_frames:
+                            save_future = save_executor.submit(
+                                save_episode_and_emit, dataset, ctx, strategy="episodic_dagger"
+                            )
+                        try:
+                            self._run_reset(
+                                ctx,
+                                duration_s=dataset_cfg.reset_time_s,
+                            )
+                        finally:
+                            if save_future is not None:
+                                save_future.result()
 
                     if outcome == "rerecord":
                         dataset.clear_episode_buffer()
                         continue
 
-                    if self._episode_has_frames(dataset):
-                        save_episode_and_emit(dataset, ctx, strategy="episodic_dagger")
+                    if has_frames:
+                        if save_future is None:
+                            save_episode_and_emit(dataset, ctx, strategy="episodic_dagger")
                         self._needs_push.set()
                         recorded_episodes += 1
 
             finally:
-                self._engine.pause()
+                try:
+                    self._engine.pause()
+                except Exception:
+                    logger.exception("Could not pause engine; still preserving recorded frames")
                 # Preserve a partial episode when the process is interrupted.
-                with contextlib.suppress(Exception):
-                    if self._episode_has_frames(dataset):
-                        save_episode_and_emit(dataset, ctx, strategy="episodic_dagger")
-                        self._needs_push.set()
+                if self._episode_has_frames(dataset):
+                    save_episode_and_emit(dataset, ctx, strategy="episodic_dagger")
+                    self._needs_push.set()
 
     def _run_episode(
         self,
@@ -130,7 +198,14 @@ class EpisodicDAggerStrategy(DAggerStrategy):
         task = cfg.dataset.single_task if cfg.dataset else cfg.task
         episode_started = time.perf_counter()
         record_tick = 0
-        last_action: dict[str, Any] | None = None
+        last_action = self._capture_hold_action(robot)
+        activity_gate = None
+        if self.config.trim_leading_idle:
+            activity_gate = _EpisodeActivityGate(
+                threshold=self.config.motion_start_threshold,
+                consecutive_frames=self.config.motion_start_consecutive_frames,
+                pre_roll_frames=max(1, round(self.config.motion_start_pre_roll_s * cfg.fps / record_stride)),
+            )
 
         self._emit_episode_phase(DAggerPhase.AUTONOMOUS, episode, total_episodes)
         log_say(f"Recording episode {episode}", cfg.play_sounds)
@@ -157,11 +232,26 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                 old_phase, new_phase = transition
                 self._apply_transition(old_phase, new_phase, engine, interpolator, ctx, last_action)
                 self._emit_episode_phase(new_phase, episode, total_episodes)
-                if new_phase == DAggerPhase.AUTONOMOUS:
-                    last_action = None
+                # Keep the last human/policy target active until the freshly
+                # reset RTC queue has produced a replacement action.
 
             phase = self._events.phase
             obs = robot.get_observation()
+            recovery_s, recovery_hold = self._handle_motor_bus_recovery(
+                robot,
+                obs,
+                phase,
+                engine,
+                interpolator,
+                strategy="episodic_dagger",
+                runtime_data={"episode": episode, "total_episodes": total_episodes},
+            )
+            if recovery_s > 0:
+                # A reconnect pause is neither task time nor a valid dataset frame.
+                episode_started += recovery_s
+                if recovery_hold is not None:
+                    last_action = recovery_hold
+                continue
 
             if phase == DAggerPhase.CORRECTING:
                 obs_processed = ctx.processors.robot_observation_processor(obs)
@@ -179,6 +269,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                         processed_teleop,
                         task,
                         intervention=True,
+                        activity_gate=activity_gate,
+                        force_start=True,
                     )
                 record_tick += 1
             elif phase == DAggerPhase.PAUSED:
@@ -200,8 +292,11 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                             action,
                             task,
                             intervention=False,
+                            activity_gate=activity_gate,
                         )
                     record_tick += 1
+                elif last_action:
+                    robot.send_action(last_action)
 
             elapsed = time.perf_counter() - loop_started
             precise_sleep(max(control_interval - elapsed, 0.0))
@@ -211,17 +306,30 @@ class EpisodicDAggerStrategy(DAggerStrategy):
         return "finished", last_action
 
     @staticmethod
-    def _record_frame(dataset, features, observation, action, task: str, *, intervention: bool) -> None:
+    def _record_frame(
+        dataset,
+        features,
+        observation,
+        action,
+        task: str,
+        *,
+        intervention: bool,
+        activity_gate: _EpisodeActivityGate | None = None,
+        force_start: bool = False,
+    ) -> None:
         obs_frame = build_dataset_frame(features, observation, prefix=OBS_STR)
         action_frame = build_dataset_frame(features, action, prefix=ACTION)
-        dataset.add_frame(
-            {
-                **obs_frame,
-                **action_frame,
-                "task": task,
-                "intervention": np.array([intervention], dtype=bool),
-            }
-        )
+        frame = {
+            **obs_frame,
+            **action_frame,
+            "task": task,
+            "intervention": np.array([intervention], dtype=bool),
+        }
+        ready = activity_gate.push(frame, force_start=force_start) if activity_gate is not None else [frame]
+        for ready_frame in ready:
+            dataset.add_frame(ready_frame)
+        if activity_gate is not None and activity_gate.just_activated and activity_gate.trimmed_frames:
+            logger.info("Dynamic episode trim removed %d leading idle frames", activity_gate.trimmed_frames)
 
     def _prepare_teleop_reset(
         self,
@@ -274,6 +382,17 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                 break
 
             obs = robot.get_observation()
+            recovery_s, _ = self._handle_motor_bus_recovery(
+                robot,
+                obs,
+                DAggerPhase.CORRECTING,
+                self._engine,
+                self._interpolator,
+                strategy="episodic_dagger",
+            )
+            if recovery_s > 0:
+                started += recovery_s
+                continue
             teleop_action = teleop.get_action()
             processed = ctx.processors.teleop_action_processor((teleop_action, obs))
             robot_action = ctx.processors.robot_action_processor((processed, obs))

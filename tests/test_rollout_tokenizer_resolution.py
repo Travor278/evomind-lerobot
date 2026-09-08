@@ -56,19 +56,3 @@ def test_existing_configured_tokenizer_does_not_need_override(tmp_path):
     _write_processor_config(policy_dir, str(tokenizer_dir))
 
     assert _resolve_local_tokenizer(str(policy_dir)) is None
-
-
-def test_checkpoint_tokenizer_wins_over_inaccessible_training_path(tmp_path, monkeypatch):
-    policy_dir = tmp_path / "policy"
-    _write_processor_config(policy_dir, "/root/paligama_file")
-    tokenizer_dir = _write_tokenizer(policy_dir / "tokenizer")
-    original_is_dir = Path.is_dir
-
-    def guarded_is_dir(path: Path) -> bool:
-        if str(path) == "/root/paligama_file":
-            raise AssertionError("checkpoint-local tokenizer should be resolved first")
-        return original_is_dir(path)
-
-    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
-
-    assert _resolve_local_tokenizer(str(policy_dir)) == str(tokenizer_dir)

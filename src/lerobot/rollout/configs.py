@@ -119,6 +119,11 @@ class DAggerPedalConfig:
     pause_resume: str = "KEY_A"
     correction: str = "KEY_B"
     upload: str = "KEY_C"
+    # Optional single-pedal takeover control.  When set, the first press while
+    # PAUSED starts human correction and the next press resumes the policy.
+    # Use "*" for a dedicated pedal whose programmed key code is irrelevant.
+    intervention: str | None = None
+    debounce_s: float = 0.35
 
 
 @RolloutStrategyConfig.register_subclass("episodic")
@@ -218,6 +223,22 @@ class EpisodicDAggerStrategyConfig(DAggerStrategyConfig):
     """
 
     record_autonomous: bool = field(default=True, init=False)
+    # Delay dataset writes until the follower has actually started moving.
+    # This is evaluated independently for every episode; it is not a fixed
+    # time crop. A short pre-roll is retained when recording opens.
+    trim_leading_idle: bool = True
+    motion_start_threshold: float = 3.0
+    motion_start_consecutive_frames: int = 5
+    motion_start_pre_roll_s: float = 1.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.motion_start_threshold <= 0:
+            raise ValueError("motion_start_threshold must be positive")
+        if self.motion_start_consecutive_frames < 1:
+            raise ValueError("motion_start_consecutive_frames must be at least 1")
+        if self.motion_start_pre_roll_s < 0:
+            raise ValueError("motion_start_pre_roll_s must not be negative")
 
 
 # ---------------------------------------------------------------------------

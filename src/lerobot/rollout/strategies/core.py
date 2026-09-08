@@ -53,6 +53,19 @@ class RolloutStrategy(abc.ABC):
         self._warmup_flushed: bool = False
         self._cached_obs_processed: dict | None = None
 
+    def _on_hardware_interrupted(self) -> None:
+        # Never run the automatic return motion after an unrecovered disconnect.
+        self._hardware_interrupted = True
+
+    def _on_hardware_recovered(self) -> None:
+        """Invalidate every cached observation/action before the next full frame."""
+        if self._engine is not None:
+            self._engine.recover()
+        if self._interpolator is not None:
+            self._interpolator.reset()
+        self._cached_obs_processed = None
+        self._hardware_interrupted = False
+
     def _init_engine(self, ctx: RolloutContext) -> None:
         """Attach the inference engine and action interpolator, then start the backend.
 
@@ -123,8 +136,25 @@ class RolloutStrategy(abc.ABC):
             logger.info("Stopping inference engine...")
             self._engine.stop()
         robot = hw.robot_wrapper.inner
-        if robot.is_connected:
-            if return_to_initial_position and hw.initial_position:
+        recovery_failed = getattr(robot, "motor_bus_recovery_failed", False) is True
+        if recovery_failed:
+            return_to_initial_position = False
+            preserve = getattr(robot, "preserve_recovery_pose_on_disconnect", None)
+            if callable(preserve):
+                preserve()
+            logger.warning("Motor recovery failed: no return-to-initial-position and no torque-state change during cleanup")
+        if not hw.disconnect_on_teardown and not recovery_failed:
+            logger.info("Keeping robot, cameras, and teleoperator connected for the next collection run")
+            return
+        robot = hw.robot_wrapper.inner
+        if recovery_failed and callable(getattr(robot, "disconnect_after_motor_fault", None)):
+            robot.disconnect_after_motor_fault()
+        elif robot.is_connected:
+            if (
+                return_to_initial_position
+                and hw.initial_position
+                and not getattr(self, "_hardware_interrupted", False)
+            ):
                 logger.info("Returning robot to initial position before shutdown...")
                 self._return_to_initial_position(hw)
             elif not return_to_initial_position:
@@ -211,7 +241,22 @@ def save_episode_and_emit(dataset, ctx: RolloutContext, *, strategy: str) -> int
         raise RuntimeError("当前 Rollout 没有数据集配置")
     episode_index = dataset.num_episodes
     frames = int(dataset.writer.episode_buffer["size"])
-    dataset.save_episode()
+    snapshot = dict(dataset.writer.episode_buffer)
+    try:
+        dataset.save_episode()
+    except Exception as error:
+        # Native save mutates this dictionary before writing parquet/metadata.
+        # Retain its pre-save values and report salvage separately from success.
+        dataset.writer.episode_buffer = snapshot
+        from ..episode_recovery import preserve_failed_episode
+        try:
+            recovery_path = preserve_failed_episode(dataset.root, snapshot, error)
+            emit_runtime_event("rollout", "running", stage="episode_save_failed",
+                               records_data=False, error=str(error), recovery_path=str(recovery_path))
+        except Exception:
+            logger.exception("Emergency episode salvage also failed")
+        logger.exception("Native episode save failed; episode not marked saved")
+        raise
     emit_runtime_event(
         "rollout",
         "running",

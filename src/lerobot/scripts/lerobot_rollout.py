@@ -200,21 +200,19 @@ from lerobot.utils.visualization_utils import init_visualization, shutdown_visua
 logger = logging.getLogger(__name__)
 
 
-@parser.wrap()
-def rollout(cfg: RolloutConfig):
-    """Main entry point for policy deployment."""
+def run_rollout(
+    cfg: RolloutConfig,
+    *,
+    connected_hardware=None,
+    keep_hardware_connected: bool = False,
+):
+    """Run one rollout, optionally retaining its hardware for a later run."""
     init_logging()
     emit_runtime_event(
         "rollout",
         "starting",
         robot_type=cfg.robot.type if cfg.robot is not None else None,
         strategy=cfg.strategy.type,
-        inference_backend=cfg.inference.type,
-        policy_type=cfg.policy.type if cfg.policy is not None else None,
-        device=cfg.device,
-        precision=getattr(cfg.policy, "dtype", None),
-        camera_mapping=cfg.rename_map,
-        return_to_initial_position=cfg.return_to_initial_position,
     )
 
     if cfg.display_data:
@@ -231,7 +229,12 @@ def rollout(cfg: RolloutConfig):
 
     logger.info("Building rollout context...")
     emit_runtime_event("rollout", "connecting", strategy=cfg.strategy.type)
-    ctx = build_rollout_context(cfg, shutdown_event)
+    ctx = build_rollout_context(
+        cfg,
+        shutdown_event,
+        connected_hardware=connected_hardware,
+        keep_hardware_connected=keep_hardware_connected,
+    )
 
     strategy = create_strategy(cfg.strategy)
     logger.info("Rollout strategy: %s", cfg.strategy.type)
@@ -251,16 +254,15 @@ def rollout(cfg: RolloutConfig):
             strategy=cfg.strategy.type,
             control_source="policy",
             records_data=cfg.dataset is not None,
-            inference_backend=cfg.inference.type,
-            policy_type=cfg.policy.type if cfg.policy is not None else None,
-            device=cfg.device,
-            precision=getattr(cfg.policy, "dtype", None),
-            camera_mapping=cfg.rename_map,
-            return_to_initial_position=cfg.return_to_initial_position,
         )
         strategy.run(ctx)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
+    except BaseException:
+        # A transport/control failure can leave the cached device state invalid.
+        # Force a real disconnect instead of carrying a broken session forward.
+        ctx.hardware.disconnect_on_teardown = True
+        raise
     finally:
         emit_runtime_event("rollout", "stopping", strategy=cfg.strategy.type)
         strategy.teardown(ctx)
@@ -269,6 +271,13 @@ def rollout(cfg: RolloutConfig):
 
     logger.info("Rollout finished")
     emit_runtime_event("rollout", "completed", strategy=cfg.strategy.type)
+    return ctx.hardware if keep_hardware_connected else None
+
+
+@parser.wrap()
+def rollout(cfg: RolloutConfig):
+    """Main CLI entry point; CLI runs retain the original connect/disconnect lifecycle."""
+    run_rollout(cfg)
 
 
 def main():

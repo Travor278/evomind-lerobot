@@ -33,7 +33,15 @@ class SOLeaderConfig:
     # return a corrupted status packet ("Incorrect status packet!"), especially when several joints move
     # at once, which otherwise aborts the teleoperation loop. Retries are immediate (no sleep) and only
     # happen on failure, so the steady-state read cost is unchanged.
-    num_read_retries: int = 2
+    num_read_retries: int = 7
+
+    # Number of extra attempts for acknowledged register writes during startup.
+    num_write_retries: int = 5
+
+    # Rebuild the serial transport after the normal packet retries are exhausted.
+    read_reconnect_attempts: int = 12
+    read_reconnect_backoff_s: float = 0.1
+    read_reconnect_max_backoff_s: float = 1.0
 
 
 @TeleoperatorConfig.register_subclass("so101_leader")

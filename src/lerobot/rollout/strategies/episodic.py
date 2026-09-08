@@ -41,6 +41,7 @@ from lerobot.common.control_utils import (
 from lerobot.datasets import VideoEncodingManager
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.utils.hardware_recovery import hardware_frame
 from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import emit_runtime_event, take_runtime_commands
@@ -239,42 +240,47 @@ class EpisodicStrategy(RolloutStrategy):
         start_t = time.perf_counter()
 
         while timestamp < control_time_s:
-            loop_start = time.perf_counter()
+            with hardware_frame(
+                "rollout", self._on_hardware_recovered, self._on_hardware_interrupted
+            ) as hardware_status:
+                loop_start = time.perf_counter()
 
-            self._take_runtime_commands(events)
+                self._take_runtime_commands(events)
 
-            if events["exit_early"]:
-                events["exit_early"] = False
-                break
+                if events["exit_early"]:
+                    events["exit_early"] = False
+                    break
 
-            if ctx.runtime.shutdown_event.is_set():
-                break
+                if ctx.runtime.shutdown_event.is_set():
+                    break
 
-            obs = robot.get_observation()
-            obs_processed = self._process_observation_and_notify(ctx.processors, obs)
+                obs = robot.get_observation()
+                obs_processed = self._process_observation_and_notify(ctx.processors, obs)
 
-            if self._handle_warmup(ctx.runtime.cfg.use_torch_compile, loop_start, control_interval):
-                continue
+                if self._handle_warmup(ctx.runtime.cfg.use_torch_compile, loop_start, control_interval):
+                    continue
 
-            action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
+                action_dict = send_next_action(obs_processed, obs, ctx, interpolator)
 
-            if action_dict is not None:
-                obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
-                action_frame = build_dataset_frame(features, action_dict, prefix=ACTION)
-                dataset.add_frame({**obs_frame, **action_frame, "task": single_task})
-                self._log_telemetry(obs_processed, action_dict, ctx.runtime)
+                if action_dict is not None:
+                    obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
+                    action_frame = build_dataset_frame(features, action_dict, prefix=ACTION)
+                    dataset.add_frame({**obs_frame, **action_frame, "task": single_task})
+                    self._log_telemetry(obs_processed, action_dict, ctx.runtime)
 
-            dt = time.perf_counter() - loop_start
-            sleep_t = control_interval - dt
-            if sleep_t < 0:
-                logger.warning(
-                    f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({fps} Hz). "
-                    "Dataset frames might be dropped and robot control might be unstable. "
-                    "Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long "
-                    "3) CPU starvation"
-                )
-            precise_sleep(max(sleep_t, 0.0))
-            timestamp = time.perf_counter() - start_t
+                dt = time.perf_counter() - loop_start
+                sleep_t = control_interval - dt
+                if sleep_t < 0:
+                    logger.warning(
+                        f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({fps} Hz). "
+                        "Dataset frames might be dropped and robot control might be unstable. "
+                        "Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long "
+                        "3) CPU starvation"
+                    )
+                precise_sleep(max(sleep_t, 0.0))
+                timestamp = time.perf_counter() - start_t
+            if hardware_status.recovered:
+                timestamp = time.perf_counter() - start_t
 
     def _reset_loop(
         self,
@@ -296,38 +302,43 @@ class EpisodicStrategy(RolloutStrategy):
         start_t = time.perf_counter()
 
         while timestamp < control_time_s:
-            loop_start = time.perf_counter()
+            with hardware_frame(
+                "rollout", self._on_hardware_recovered, self._on_hardware_interrupted
+            ) as hardware_status:
+                loop_start = time.perf_counter()
 
-            self._take_runtime_commands(events)
+                self._take_runtime_commands(events)
 
-            if events["exit_early"]:
-                events["exit_early"] = False
-                break
+                if events["exit_early"]:
+                    events["exit_early"] = False
+                    break
 
-            if ctx.runtime.shutdown_event.is_set():
-                break
+                if ctx.runtime.shutdown_event.is_set():
+                    break
 
-            obs = robot.get_observation()
+                obs = robot.get_observation()
 
-            if teleop is not None:
-                act = teleop.get_action()
-                act_teleop = processors.teleop_action_processor((act, obs))
-                robot_action = processors.robot_action_processor((act_teleop, obs))
-                robot.send_action(robot_action)
+                if teleop is not None:
+                    act = teleop.get_action()
+                    act_teleop = processors.teleop_action_processor((act, obs))
+                    robot_action = processors.robot_action_processor((act_teleop, obs))
+                    robot.send_action(robot_action)
 
-                if display_data:
-                    obs_processed = processors.robot_observation_processor(obs)
-                    log_visualization_data(
-                        display_mode,
-                        observation=obs_processed,
-                        action=act_teleop,
-                        compress_images=display_compressed,
-                    )
+                    if display_data:
+                        obs_processed = processors.robot_observation_processor(obs)
+                        log_visualization_data(
+                            display_mode,
+                            observation=obs_processed,
+                            action=act_teleop,
+                            compress_images=display_compressed,
+                        )
 
-            dt = time.perf_counter() - loop_start
-            sleep_t = control_interval - dt
-            precise_sleep(max(sleep_t, 0.0))
-            timestamp = time.perf_counter() - start_t
+                dt = time.perf_counter() - loop_start
+                sleep_t = control_interval - dt
+                precise_sleep(max(sleep_t, 0.0))
+                timestamp = time.perf_counter() - start_t
+            if hardware_status.recovered:
+                timestamp = time.perf_counter() - start_t
 
     @staticmethod
     def _take_runtime_commands(events: dict) -> None:

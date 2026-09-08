@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import multiprocessing as mp
 import threading
 import time
 from typing import Any
@@ -87,7 +86,7 @@ def stop_motion_identification() -> dict[str, str]:
     return {"status": "stopped"}
 
 
-def _read_camera_frame(capture: Any, timeout_seconds: float = 3.0) -> Any | None:
+def _read_camera_frame(capture: Any, timeout_seconds: float = 1.5) -> Any | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         frame_ok, frame = capture.read()
@@ -97,101 +96,32 @@ def _read_camera_frame(capture: Any, timeout_seconds: float = 3.0) -> Any | None
     return None
 
 
-def _encode_preview(frame: Any) -> str | None:
-    import cv2
-
-    encoded_ok, encoded = cv2.imencode(".jpg", frame)
-    if not encoded_ok:
-        return None
-    return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
-
-
-def _opencv_preview(camera: dict[str, Any]) -> str | None:
-    import cv2
-
-    # Opening sibling V4L nodes can select depth/metadata endpoints and reset a
-    # marginal USB hub. Use only the selected RGB endpoint and MJPEG bandwidth.
-    capture = cv2.VideoCapture(camera["path"], cv2.CAP_V4L2)
-    try:
-        if not capture.isOpened():
-            return None
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        capture.set(cv2.CAP_PROP_FPS, 30)
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        frame = _read_camera_frame(capture)
-        return _encode_preview(frame) if frame is not None else None
-    finally:
-        capture.release()
-
-
-def _realsense_preview(camera: dict[str, Any]) -> str | None:
-    import numpy as np
-    import pyrealsense2 as rs
-
-    pipeline = rs.pipeline()
-    config = rs.config()
-    if camera.get("serial_number"):
-        config.enable_device(camera["serial_number"])
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    started = False
-    try:
-        pipeline.start(config)
-        started = True
-        frames = pipeline.wait_for_frames(timeout_ms=3000)
-        color_frame = frames.get_color_frame()
-        if not color_frame:
-            return None
-        return _encode_preview(np.asanyarray(color_frame.get_data()))
-    finally:
-        if started:
-            pipeline.stop()
-
-
-def _camera_preview_worker(camera: dict[str, Any], connection: Any) -> None:
-    try:
-        preview = (
-            _realsense_preview(camera) if camera["driver"] == "intelrealsense" else _opencv_preview(camera)
-        )
-        connection.send(preview)
-    except Exception:
-        connection.send(None)
-    finally:
-        connection.close()
-
-
-def _camera_preview_with_timeout(camera: dict[str, Any], timeout_seconds: float = 6.0) -> str | None:
-    # Kernel-level V4L2 reads can ignore thread deadlines after a disconnect.
-    # A short-lived process gives the web service a reliable upper bound.
-    context = mp.get_context("spawn")
-    parent, child = context.Pipe(duplex=False)
-    process = context.Process(target=_camera_preview_worker, args=(camera, child), daemon=True)
-    process.start()
-    child.close()
-    try:
-        return parent.recv() if parent.poll(timeout_seconds) else None
-    except (EOFError, OSError):
-        return None
-    finally:
-        parent.close()
-        process.join(timeout=0.2)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=1.0)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=1.0)
-
-
 def camera_previews() -> list[dict[str, Any]]:
+    import cv2
+
     previews = []
     for camera in hardware_inventory()["cameras"]:
         preview_data_url = None
         preview_error = "摄像头已识别，但无法读取画面"
-        preview_data_url = _camera_preview_with_timeout(camera)
-        if preview_data_url is not None:
-            preview_error = None
+        for capture_path in camera.get("capture_paths", [camera["path"]]):
+            capture = cv2.VideoCapture(capture_path)
+            try:
+                if not capture.isOpened():
+                    continue
+                frame = _read_camera_frame(capture)
+                if frame is None:
+                    continue
+                encoded_ok, encoded = cv2.imencode(".jpg", frame)
+                if not encoded_ok:
+                    continue
+                preview_data_url = (
+                    "data:image/jpeg;base64,"
+                    + base64.b64encode(encoded.tobytes()).decode("ascii")
+                )
+                preview_error = None
+                break
+            finally:
+                capture.release()
         previews.append(
             {
                 "id": camera["id"],

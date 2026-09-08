@@ -290,25 +290,15 @@ code { font-family: var(--font-geist-mono), monospace; }
 .workflow-actions { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 18px; }
 .workflow-actions span { color: var(--subtle); font-size: 12px; }
 .workflow-command-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.policy-residency-controls { display: grid; gap: 8px; padding-top: 10px; }
+.policy-residency-controls { display: grid; gap: 10px; padding-top: 14px; }
 .policy-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .policy-actions.resident-ready { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .policy-actions button { width: 100%; }
-.policy-residency { display: grid; gap: 2px; border-left: 2px solid #999; background: #f3f3f3; padding: 9px 12px; }
+.policy-residency { display: grid; gap: 4px; border-left: 2px solid #999; background: #f3f3f3; padding: 11px 13px; }
 .policy-residency.ready { border-left-color: var(--success); }
 .policy-residency.loading { border-left-color: #c98900; }
 .policy-residency span, .policy-residency small { color: var(--subtle); font-size: 11px; }
 .policy-residency strong { overflow-wrap: anywhere; font-size: 13px; font-weight: 550; }
-.policy-runtime { display: grid; gap: 3px; margin-top: 10px; border-left: 2px solid #999; background: #f3f3f3; padding: 9px 12px; }
-.policy-runtime.ready { border-left-color: var(--success); }
-.policy-runtime.warning { border-left-color: #c98900; }
-.policy-runtime.error { border-left-color: var(--danger); }
-.policy-runtime-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.policy-runtime-heading span, .policy-runtime > span { display: block; margin-bottom: 2px; color: var(--subtle); font-size: 11px; }
-.policy-runtime strong { overflow-wrap: anywhere; font-size: 13px; font-weight: 550; }
-.policy-runtime small { overflow-wrap: anywhere; color: var(--subtle); font-size: 11px; line-height: 1.35; }
-.policy-runtime-heading i { color: var(--success); font-size: 11px; font-style: normal; white-space: nowrap; }
-.policy-runtime.error .policy-runtime-heading i, .policy-runtime-issue { color: var(--danger); }
 .inference-workflow > .workflow-grid > .workflow-primary > .workflow-actions { display: block; }
 .inference-workflow > .workflow-grid > .workflow-primary > .workflow-actions .workflow-command-buttons { display: grid; grid-template-columns: minmax(0, 1fr); width: 100%; }
 .inference-workflow > .workflow-grid > .workflow-primary > .workflow-actions .workflow-command-buttons button { width: 100%; min-height: 46px; }

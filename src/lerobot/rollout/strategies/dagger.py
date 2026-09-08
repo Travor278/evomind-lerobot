@@ -44,7 +44,6 @@ Teleoperator handover:
 
 from __future__ import annotations
 
-import contextlib
 import enum
 import logging
 import time
@@ -105,6 +104,13 @@ _DAGGER_TRANSITIONS: dict[tuple[DAggerPhase, str], DAggerPhase] = {
     (DAggerPhase.PAUSED, "pause_resume"): DAggerPhase.AUTONOMOUS,
     (DAggerPhase.PAUSED, "correction"): DAggerPhase.CORRECTING,
     (DAggerPhase.CORRECTING, "correction"): DAggerPhase.PAUSED,
+    # The first press matches the webpage's "start intervention" button:
+    # pause policy and align the leader, without immediately handing over.
+    (DAggerPhase.AUTONOMOUS, "pedal_intervention"): DAggerPhase.PAUSED,
+    # A dedicated single pedal skips the intermediate PAUSED state when the
+    # operator releases control: the policy resumes from the corrected pose.
+    (DAggerPhase.PAUSED, "pedal_intervention"): DAggerPhase.CORRECTING,
+    (DAggerPhase.CORRECTING, "pedal_intervention"): DAggerPhase.AUTONOMOUS,
 }
 
 
@@ -119,6 +125,7 @@ class DAggerEvents:
         self._lock = Lock()
         self._phase = DAggerPhase.AUTONOMOUS
         self._pending_transition: str | None = None
+        self._recovering = False
 
         # Session-level flags
         self.stop_recording = Event()
@@ -144,8 +151,13 @@ class DAggerEvents:
         from the current phase, preventing impossible state changes.
         """
         with self._lock:
-            if (self._phase, event) in _DAGGER_TRANSITIONS:
+            if not self._recovering and (self._phase, event) in _DAGGER_TRANSITIONS:
                 self._pending_transition = event
+
+    def set_recovering(self, active: bool) -> None:
+        with self._lock:
+            self._recovering = active
+            self._pending_transition = None
 
     def consume_transition(self) -> tuple[DAggerPhase, DAggerPhase] | None:
         """Consume a pending transition (called from main loop)."""
@@ -167,6 +179,7 @@ class DAggerEvents:
             self._phase = DAggerPhase.AUTONOMOUS
             self._pending_transition = None
         self.upload_requested.clear()
+        self.set_recovering(False)
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +229,17 @@ def _init_dagger_pedal(events: DAggerEvents, cfg: DAggerPedalConfig):
         cfg.pause_resume: "pause_resume",
         cfg.correction: "correction",
     }
+    last_intervention_press = 0.0
 
     def on_press(code: str) -> None:
+        nonlocal last_intervention_press
+        if cfg.intervention is not None and (cfg.intervention == "*" or code == cfg.intervention):
+            now = time.monotonic()
+            if now - last_intervention_press < cfg.debounce_s:
+                return
+            last_intervention_press = now
+            events.request_transition("pedal_intervention")
+            return
         if code in code_to_event:
             events.request_transition(code_to_event[code])
         if code == cfg.upload:
@@ -259,20 +281,121 @@ class DAggerStrategy(RolloutStrategy):
         self._needs_push = Event()
         self._episode_lock = Lock()
 
+    @staticmethod
+    def _hold_action_from_observation(robot, observation: dict[str, Any]) -> dict[str, Any] | None:
+        """Latch the measured joint pose without performing another motor read."""
+        action_keys = list(robot.action_features)
+        missing = [key for key in action_keys if key not in observation]
+        if missing:
+            logger.warning("Cannot latch hold pose; missing action keys in observation: %s", missing)
+            return None
+        hold_action = {key: observation[key] for key in action_keys}
+        robot.send_action(hold_action)
+        return hold_action
+
+    @classmethod
+    def _capture_hold_action(cls, robot) -> dict[str, Any] | None:
+        """Command the current joint pose while the first policy chunk is pending.
+
+        Async inference starts with an empty action queue. Explicitly latching
+        the measured pose prevents the servos from sitting on an old target and
+        visibly hunting while cameras and the first RTC chunk become ready.
+        """
+        observation = robot.get_observation()
+        hold_action = cls._hold_action_from_observation(robot, observation)
+        if hold_action is not None:
+            logger.info("Latched current robot pose while waiting for the first policy action")
+        return hold_action
+
+    @staticmethod
+    def _consume_motor_bus_recovery_duration_s(robot) -> float:
+        """Consume a follower recovery pause exposed by the underlying robot."""
+        inner = getattr(robot, "inner", robot)
+        consume = getattr(inner, "consume_motor_bus_recovery_duration_s", None)
+        if not callable(consume):
+            return 0.0
+        try:
+            return max(0.0, float(consume()))
+        except (TypeError, ValueError):
+            logger.exception("Robot returned an invalid motor-bus recovery duration")
+            return 0.0
+
+    def _handle_motor_bus_recovery(
+        self,
+        robot,
+        observation: dict[str, Any],
+        phase: DAggerPhase,
+        engine,
+        interpolator,
+        *,
+        strategy: str = "dagger",
+        runtime_data: dict[str, Any] | None = None,
+    ) -> tuple[float, dict[str, Any] | None]:
+        """Discard stale policy actions and safely resume after a follower reconnect."""
+        recovery_s = self._consume_motor_bus_recovery_duration_s(robot)
+        if recovery_s <= 0:
+            return 0.0, None
+
+        engine.pause()
+        interpolator.reset()
+        engine.reset()
+        hold_action = self._hold_action_from_observation(robot, observation)
+        if phase == DAggerPhase.AUTONOMOUS:
+            engine.resume()
+        self._events.set_recovering(False)
+
+        logger.warning(
+            "Follower motor bus recovered after %.2fs; stale RTC actions cleared and current pose latched",
+            recovery_s,
+        )
+        event_data = {
+            "strategy": strategy,
+            "rollout_phase": phase.value,
+            "motor_bus_recovered": True,
+            "recovery_duration_s": recovery_s,
+            "records_data": True,
+            "record_autonomous": self.config.record_autonomous,
+        }
+        if runtime_data:
+            event_data.update(runtime_data)
+        emit_runtime_event(
+            "rollout",
+            "running",
+            **event_data,
+        )
+        return recovery_s, hold_action
+
     def setup(self, ctx: RolloutContext) -> None:
         """Initialise the inference engine and input device listener."""
         self._init_engine(ctx)
+        inner = ctx.hardware.robot_wrapper.inner
+        install = getattr(inner, "set_motor_bus_recovery_callback", None)
+        if callable(install):
+            def on_recovery(stage, port, error):
+                self._events.set_recovering(True)
+                emit_runtime_event(
+                    "rollout", "running", stage="motor_recovering",
+                    rollout_phase="recovering", records_data=False,
+                    port=port, error=error,
+                    message="电机通信中断：暂停新动作，正在重连并验证稳定性",
+                )
+                # This hook runs under the robot I/O lock. It must never call
+                # get_observation/send_action or try to acquire that lock again.
+                self._engine.pause()
+                self._interpolator.reset()
+            install(on_recovery, lambda: ctx.runtime.shutdown_event.is_set() or self._events.stop_recording.is_set())
         self._push_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dagger-push")
         target_mb = self.config.target_video_file_size_mb or DEFAULT_VIDEO_FILE_SIZE_IN_MB
         self._episode_duration_s = estimate_max_episode_seconds(
             ctx.data.dataset_features, ctx.runtime.cfg.fps, target_size_mb=target_mb
         )
 
-        if not runtime_bridge_active():
-            if self.config.input_device == "keyboard":
-                self._listener = _init_dagger_keyboard(self._events, self.config.keyboard)
-            else:
-                self._pedal_thread = _init_dagger_pedal(self._events, self.config.pedal)
+        # The web runtime replaces only keyboard controls. A physical pedal
+        # must keep listening while web commands are active.
+        if self.config.input_device == "pedal":
+            self._pedal_thread = _init_dagger_pedal(self._events, self.config.pedal)
+        elif not runtime_bridge_active():
+            self._listener = _init_dagger_keyboard(self._events, self.config.keyboard)
 
         record_mode = "all frames (sentry-like)" if self.config.record_autonomous else "corrections only"
         logger.info(
@@ -324,23 +447,27 @@ class DAggerStrategy(RolloutStrategy):
             self._push_executor.shutdown(wait=True)
             self._push_executor = None
 
-        if ctx.data.dataset is not None:
-            logger.info("Finalizing dataset...")
-            ctx.data.dataset.finalize()
-            if self._needs_push.is_set() and ctx.runtime.cfg.dataset and ctx.runtime.cfg.dataset.push_to_hub:
-                logger.info("Pushing final dataset to hub...")
-                if safe_push_to_hub(
-                    ctx.data.dataset,
-                    tags=ctx.runtime.cfg.dataset.tags,
-                    private=ctx.runtime.cfg.dataset.private,
-                ):
-                    logger.info("Dataset uploaded to hub")
-                    log_say("Dataset uploaded to hub", play_sounds)
-
-        self._teardown_hardware(
-            ctx.hardware,
-            return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
-        )
+        try:
+            if ctx.data.dataset is not None:
+                logger.info("Finalizing dataset...")
+                ctx.data.dataset.finalize()
+                if self._needs_push.is_set() and ctx.runtime.cfg.dataset and ctx.runtime.cfg.dataset.push_to_hub:
+                    logger.info("Pushing final dataset to hub...")
+                    if safe_push_to_hub(
+                        ctx.data.dataset, tags=ctx.runtime.cfg.dataset.tags,
+                        private=ctx.runtime.cfg.dataset.private,
+                    ):
+                        logger.info("Dataset uploaded to hub")
+                        log_say("Dataset uploaded to hub", play_sounds)
+        finally:
+            try:
+                self._teardown_hardware(
+                    ctx.hardware, return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
+                )
+            finally:
+                install = getattr(ctx.hardware.robot_wrapper.inner, "set_motor_bus_recovery_callback", None)
+                if callable(install):
+                    install(None)
         logger.info("DAgger strategy teardown complete")
 
     # ------------------------------------------------------------------
@@ -375,7 +502,7 @@ class DAggerStrategy(RolloutStrategy):
         engine.resume()
         self._emit_phase(DAggerPhase.AUTONOMOUS)
 
-        last_action: dict[str, Any] | None = None
+        last_action = self._capture_hold_action(robot)
         record_tick = 0
         start_time = time.perf_counter()
         episode_start = time.perf_counter()
@@ -407,11 +534,22 @@ class DAggerStrategy(RolloutStrategy):
                             last_action,
                         )
                         self._emit_phase(new_phase)
-                        if new_phase == DAggerPhase.AUTONOMOUS:
-                            last_action = None
+                        # Keep sending the last valid hardware target until the
+                        # reset RTC queue produces its first new policy action.
 
                     phase = events.phase
                     obs = robot.get_observation()
+                    recovery_s, recovery_hold = self._handle_motor_bus_recovery(
+                        robot, obs, phase, engine, interpolator
+                    )
+                    if recovery_s > 0:
+                        # Recovery is a control pause, not task execution. Exclude it from the
+                        # session/episode clocks and do not record a frame for this tick.
+                        start_time += recovery_s
+                        episode_start += recovery_s
+                        if recovery_hold is not None:
+                            last_action = recovery_hold
+                        continue
 
                     # --- CORRECTING: human teleop control ---
                     # TODO(Steven): teleop runs at the same FPS as the policy. To
@@ -464,6 +602,8 @@ class DAggerStrategy(RolloutStrategy):
                                 }
                                 dataset.add_frame(frame)
                             record_tick += 1
+                        elif last_action:
+                            robot.send_action(last_action)
 
                     # Episode rotation derived from the video file-size target.
                     # Saving is deferred while a correction is ongoing so the
@@ -497,8 +637,11 @@ class DAggerStrategy(RolloutStrategy):
 
             finally:
                 logger.info("DAgger continuous control loop ended — pausing engine")
-                engine.pause()
-                with contextlib.suppress(Exception):
+                try:
+                    engine.pause()
+                except Exception:
+                    logger.exception("Could not pause engine; still preserving recorded frames")
+                if self._episode_has_frames(dataset):
                     with self._episode_lock:
                         save_episode_and_emit(dataset, ctx, strategy="dagger_continuous")
                     self._needs_push.set()
@@ -536,7 +679,7 @@ class DAggerStrategy(RolloutStrategy):
         engine.resume()
         self._emit_phase(DAggerPhase.AUTONOMOUS)
 
-        last_action: dict[str, Any] | None = None
+        last_action = self._capture_hold_action(robot)
         start_time = time.perf_counter()
         record_tick = 0
         recorded = 0
@@ -572,11 +715,10 @@ class DAggerStrategy(RolloutStrategy):
                             last_action,
                         )
                         self._emit_phase(new_phase)
-                        if new_phase == DAggerPhase.AUTONOMOUS:
-                            last_action = None
+                        # Preserve the last target across an RTC queue reset.
 
                         # Correction ended -> save episode (blocking if not streaming)
-                        if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
+                        if old_phase == DAggerPhase.CORRECTING and new_phase != DAggerPhase.CORRECTING:
                             with self._episode_lock:
                                 save_episode_and_emit(dataset, ctx, strategy="dagger_corrections")
                             recorded += 1
@@ -596,6 +738,14 @@ class DAggerStrategy(RolloutStrategy):
 
                     phase = events.phase
                     obs = robot.get_observation()
+                    recovery_s, recovery_hold = self._handle_motor_bus_recovery(
+                        robot, obs, phase, engine, interpolator
+                    )
+                    if recovery_s > 0:
+                        start_time += recovery_s
+                        if recovery_hold is not None:
+                            last_action = recovery_hold
+                        continue
 
                     # --- CORRECTING: human teleop control + recording ---
                     # TODO(Steven): teleop runs at the same FPS as the policy. To
@@ -639,6 +789,8 @@ class DAggerStrategy(RolloutStrategy):
                         if action_dict is not None:
                             self._log_telemetry(obs_processed, action_dict, ctx.runtime)
                             last_action = ctx.processors.robot_action_processor((action_dict, obs))
+                        elif last_action:
+                            robot.send_action(last_action)
 
                     dt = time.perf_counter() - loop_start
                     if (sleep_t := control_interval - dt) > 0:
@@ -650,12 +802,19 @@ class DAggerStrategy(RolloutStrategy):
 
             finally:
                 logger.info("DAgger corrections-only loop ended — pausing engine")
-                engine.pause()
-                with contextlib.suppress(Exception):
+                try:
+                    engine.pause()
+                except Exception:
+                    logger.exception("Could not pause engine; still preserving recorded frames")
+                if self._episode_has_frames(dataset):
                     with self._episode_lock:
                         save_episode_and_emit(dataset, ctx, strategy="dagger_corrections")
                     self._needs_push.set()
                     logger.info("Final in-progress episode saved")
+
+    @staticmethod
+    def _episode_has_frames(dataset) -> bool:
+        return int(dataset.writer.episode_buffer["size"]) > 0
 
     # ------------------------------------------------------------------
     # State-machine transition side-effects
@@ -706,14 +865,7 @@ class DAggerStrategy(RolloutStrategy):
                 # does non-trivial key renaming (e.g. a rename_map on action keys), the interpolation in
                 # teleop_smooth_move_to silently no-ops and the arm doesn't move.
                 logger.info("Smooth handover: moving leader arm to follower position")
-                try:
-                    teleop_smooth_move_to(teleop, prev_action)
-                except Exception:
-                    # A failed torque handover must not abort and finalize the
-                    # rollout. Release both leaders and remain paused.
-                    logger.exception("Smooth handover failed; releasing teleoperator and remaining paused")
-                    with contextlib.suppress(Exception):
-                        teleop.disable_torque()
+                teleop_smooth_move_to(teleop, prev_action)
 
         elif old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
             logger.info("Entering correction mode - human teleop control")

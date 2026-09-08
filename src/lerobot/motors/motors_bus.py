@@ -471,8 +471,13 @@ class SerialMotorsBus(MotorsBusBase):
         expected_models = {m.id: self.model_number_table[m.model] for m in self.motors.values()}
 
         found_models = {}
+        probe_errors = {}
         for id_ in self.ids:
-            model_nb = self.ping(id_)
+            try:
+                model_nb = self.ping(id_, raise_on_error=True)
+            except (ConnectionError, RuntimeError) as error:
+                probe_errors[id_] = f"{type(error).__name__}: {error}"
+                continue
             if model_nb is not None:
                 found_models[id_] = model_nb
 
@@ -503,6 +508,9 @@ class SerialMotorsBus(MotorsBusBase):
             error_lines.append(pformat(expected_models, indent=4, sort_dicts=False))
             error_lines.append("\nFull found motor list (id: model_number):")
             error_lines.append(pformat(found_models, indent=4, sort_dicts=False))
+            if probe_errors:
+                error_lines.append("\nMotor probe errors (transport or device status):")
+                error_lines.extend(f"  - {id_}: {error}" for id_, error in probe_errors.items())
 
             raise RuntimeError("\n".join(error_lines))
 
@@ -528,8 +536,17 @@ class SerialMotorsBus(MotorsBusBase):
             ConnectionError: The underlying SDK failed to open the port or the handshake did not succeed.
         """
 
-        self._connect(handshake)
-        self.set_timeout()
+        try:
+            self._connect(handshake)
+            self.set_timeout()
+        except BaseException:
+            # Handshake can fail after openPort succeeds. Close only the host
+            # transport; do not send a torque or position command on failure.
+            try:
+                self.port_handler.closePort()
+            except Exception:
+                logger.exception("Failed to close motor transport after connection failure on %s", self.port)
+            raise
         logger.debug(f"{self.__class__.__name__} connected.")
 
     def _connect(self, handshake: bool = True) -> None:
@@ -679,7 +696,7 @@ class SerialMotorsBus(MotorsBusBase):
         pass
 
     @contextmanager
-    def torque_disabled(self, motors: str | list[str] | None = None):
+    def torque_disabled(self, motors: str | list[str] | None = None, num_retry: int = 0):
         """Context-manager that guarantees torque is re-enabled.
 
         This helper is useful to temporarily disable torque when configuring motors.
@@ -689,11 +706,11 @@ class SerialMotorsBus(MotorsBusBase):
             ...     # Safe operations here
             ...     pass
         """
-        self.disable_torque(motors)
+        self.disable_torque(motors, num_retry=num_retry)
         try:
             yield
         finally:
-            self.enable_torque(motors)
+            self.enable_torque(motors, num_retry=num_retry)
 
     def set_timeout(self, timeout_ms: int | None = None):
         """Change the packet timeout used by the SDK.

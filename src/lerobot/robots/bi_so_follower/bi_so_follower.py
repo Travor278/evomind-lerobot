@@ -63,6 +63,16 @@ class BiSOFollower(BimanualMixin, Robot):
             position_d_coefficient=config.left_arm_config.position_d_coefficient,
             use_degrees=config.left_arm_config.use_degrees,
             num_read_retries=config.left_arm_config.num_read_retries,
+            num_write_retries=config.left_arm_config.num_write_retries,
+            read_reconnect_attempts=config.left_arm_config.read_reconnect_attempts,
+            read_reconnect_backoff_s=config.left_arm_config.read_reconnect_backoff_s,
+            read_reconnect_max_backoff_s=config.left_arm_config.read_reconnect_max_backoff_s,
+            read_reconnect_stable_reads=config.left_arm_config.read_reconnect_stable_reads,
+            read_reconnect_stable_interval_s=config.left_arm_config.read_reconnect_stable_interval_s,
+            read_reconnect_stable_max_delta=config.left_arm_config.read_reconnect_stable_max_delta,
+            read_reconnect_max_events=config.left_arm_config.read_reconnect_max_events,
+            read_reconnect_window_s=config.left_arm_config.read_reconnect_window_s,
+            read_reconnect_resume_max_delta=config.left_arm_config.read_reconnect_resume_max_delta,
             cameras=left_arm_cameras,
         )
 
@@ -77,6 +87,16 @@ class BiSOFollower(BimanualMixin, Robot):
             position_d_coefficient=config.right_arm_config.position_d_coefficient,
             use_degrees=config.right_arm_config.use_degrees,
             num_read_retries=config.right_arm_config.num_read_retries,
+            num_write_retries=config.right_arm_config.num_write_retries,
+            read_reconnect_attempts=config.right_arm_config.read_reconnect_attempts,
+            read_reconnect_backoff_s=config.right_arm_config.read_reconnect_backoff_s,
+            read_reconnect_max_backoff_s=config.right_arm_config.read_reconnect_max_backoff_s,
+            read_reconnect_stable_reads=config.right_arm_config.read_reconnect_stable_reads,
+            read_reconnect_stable_interval_s=config.right_arm_config.read_reconnect_stable_interval_s,
+            read_reconnect_stable_max_delta=config.right_arm_config.read_reconnect_stable_max_delta,
+            read_reconnect_max_events=config.right_arm_config.read_reconnect_max_events,
+            read_reconnect_window_s=config.right_arm_config.read_reconnect_window_s,
+            read_reconnect_resume_max_delta=config.right_arm_config.read_reconnect_resume_max_delta,
             cameras=config.right_arm_config.cameras,
         )
 
@@ -85,6 +105,30 @@ class BiSOFollower(BimanualMixin, Robot):
 
         # Only for compatibility with other parts of the codebase that expect a `robot.cameras` attribute
         self.cameras = {**self.left_arm.cameras, **self.right_arm.cameras}
+
+    def consume_motor_bus_recovery_duration_s(self) -> float:
+        """Return recovery time accumulated by either follower arm."""
+        return sum(
+            arm.consume_motor_bus_recovery_duration_s() for arm in (self.left_arm, self.right_arm)
+        )
+
+    def set_motor_bus_recovery_callback(self, callback, cancelled=None) -> None:
+        for arm in (self.left_arm, self.right_arm):
+            arm.set_motor_bus_recovery_callback(callback, cancelled)
+
+    @property
+    def motor_bus_recovery_failed(self) -> bool:
+        return self.left_arm.motor_bus_recovery_failed or self.right_arm.motor_bus_recovery_failed
+
+    def preserve_recovery_pose_on_disconnect(self) -> None:
+        for arm in (self.left_arm, self.right_arm):
+            arm.preserve_recovery_pose_on_disconnect()
+
+    def disconnect_after_motor_fault(self) -> None:
+        try:
+            self.left_arm.disconnect_after_motor_fault()
+        finally:
+            self.right_arm.disconnect_after_motor_fault()
 
     @property
     def _motors_ft(self) -> dict[str, type]:

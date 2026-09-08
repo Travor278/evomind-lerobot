@@ -40,8 +40,13 @@ class SOLeader(Teleoperator):
     def __init__(self, config: SOLeaderTeleopConfig):
         super().__init__(config)
         self.config = config
-        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = FeetechMotorsBus(
+        self.bus = self._make_motor_bus()
+
+    def _make_motor_bus(self) -> FeetechMotorsBus:
+        norm_mode_body = (
+            MotorNormMode.DEGREES if self.config.use_degrees else MotorNormMode.RANGE_M100_100
+        )
+        return FeetechMotorsBus(
             port=self.config.port,
             motors={
                 "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
@@ -130,16 +135,17 @@ class SOLeader(Teleoperator):
         print(f"Calibration saved to {self.calibration_fpath}")
 
     def configure(self) -> None:
-        self.bus.disable_torque()
-        self.bus.configure_motors()
+        num_retry = self.config.num_write_retries
+        self.bus.disable_torque(num_retry=num_retry)
+        self.bus.configure_motors(num_retry=num_retry)
         for motor in self.bus.motors:
-            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value, num_retry=num_retry)
 
     def enable_torque(self) -> None:
-        self.bus.enable_torque()
+        self.bus.enable_torque(num_retry=self.config.num_write_retries)
 
     def disable_torque(self) -> None:
-        self.bus.disable_torque()
+        self.bus.disable_torque(num_retry=self.config.num_write_retries)
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -150,10 +156,51 @@ class SOLeader(Teleoperator):
             self.bus.setup_motor(motor)
             print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
 
+    def _read_present_positions(self) -> dict[str, float]:
+        """Read joint positions, rebuilding a wedged serial transport when needed."""
+        try:
+            return self.bus.sync_read("Present_Position", num_retry=self.config.num_read_retries)
+        except ConnectionError as initial_error:
+            last_error = initial_error
+
+        for attempt in range(1, self.config.read_reconnect_attempts + 1):
+            backoff_s = min(
+                self.config.read_reconnect_backoff_s * (2 ** (attempt - 1)),
+                self.config.read_reconnect_max_backoff_s,
+            )
+            logger.warning(
+                "%s motor read failed after retries; rebuilding %s in %.2fs (%d/%d)",
+                self,
+                self.config.port,
+                backoff_s,
+                attempt,
+                self.config.read_reconnect_attempts,
+            )
+            try:
+                if self.bus.is_connected:
+                    self.bus.disconnect(False)
+                if backoff_s:
+                    time.sleep(backoff_s)
+                self.bus = self._make_motor_bus()
+                self.bus.connect()
+                positions = self.bus.sync_read(
+                    "Present_Position", num_retry=self.config.num_read_retries
+                )
+            except (ConnectionError, OSError, RuntimeError) as error:
+                last_error = error
+                continue
+            logger.warning("%s motor bus recovered on %s", self, self.config.port)
+            return positions
+
+        raise ConnectionError(
+            f"{self} motor bus did not recover on {self.config.port} after "
+            f"{self.config.read_reconnect_attempts} reopen attempt(s)"
+        ) from last_error
+
     @check_if_not_connected
     def get_action(self) -> dict[str, float]:
         start = time.perf_counter()
-        action = self.bus.sync_read("Present_Position", num_retry=self.config.num_read_retries)
+        action = self._read_present_positions()
         action = {f"{motor}.pos": val for motor, val in action.items()}
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")

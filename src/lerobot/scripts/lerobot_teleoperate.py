@@ -121,6 +121,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
+from lerobot.utils.hardware_recovery import hardware_frame
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import emit_runtime_event, take_runtime_commands
@@ -151,11 +152,6 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
-    # Some lightweight teleoperation paths do not need follower observations.
-    # Keep the default for backwards compatibility; local runtimes may disable it
-    # when the active processors are the default identity pipelines.
-    read_observation: bool = True
-    print_loop_timing: bool = True
 
 
 def teleop_loop(
@@ -169,8 +165,6 @@ def teleop_loop(
     display_mode: str = "rerun",
     duration: float | None = None,
     display_compressed_images: bool = False,
-    read_observation: bool = True,
-    print_loop_timing: bool = True,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -195,81 +189,70 @@ def teleop_loop(
     start = time.perf_counter()
     last_status_t = start
     while True:
-        loop_start = time.perf_counter()
+        with hardware_frame("teleoperation"):
+            loop_start = time.perf_counter()
 
-        # Unitree feedback and visualization need the follower observation. The
-        # default identity processors otherwise accept an empty observation, so
-        # low-latency local runtimes can avoid redundant SDK reads.
-        observation_started = time.perf_counter()
-        needs_observation = read_observation or display_data or robot.name == "unitree_g1"
-        obs = robot.get_observation() if needs_observation else {}
-        observation_s = time.perf_counter() - observation_started
+            # Get robot observation
+            # Not really needed for now other than for visualization
+            # teleop_action_processor can take None as an observation
+            # given that it is the identity processor as default
+            obs = robot.get_observation()
 
-        if robot.name == "unitree_g1":
-            teleop.send_feedback(obs)
+            if robot.name == "unitree_g1":
+                teleop.send_feedback(obs)
 
-        # Get teleop action
-        teleoperator_started = time.perf_counter()
-        raw_action = teleop.get_action()
-        teleoperator_s = time.perf_counter() - teleoperator_started
+            # Get teleop action
+            raw_action = teleop.get_action()
 
-        # Process teleop action through pipeline
-        teleop_action = teleop_action_processor((raw_action, obs))
+            # Process teleop action through pipeline
+            teleop_action = teleop_action_processor((raw_action, obs))
 
-        # Process action for robot through pipeline
-        robot_action_to_send = robot_action_processor((teleop_action, obs))
+            # Process action for robot through pipeline
+            robot_action_to_send = robot_action_processor((teleop_action, obs))
 
-        # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
-        command_started = time.perf_counter()
-        _ = robot.send_action(robot_action_to_send)
-        command_s = time.perf_counter() - command_started
+            # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
+            _ = robot.send_action(robot_action_to_send)
 
-        if display_data:
-            # Process robot observation through pipeline
-            obs_transition = robot_observation_processor(obs)
+            if display_data:
+                # Process robot observation through pipeline
+                obs_transition = robot_observation_processor(obs)
 
-            log_visualization_data(
-                display_mode,
-                observation=obs_transition,
-                action=teleop_action,
-                compress_images=display_compressed_images,
-            )
+                log_visualization_data(
+                    display_mode,
+                    observation=obs_transition,
+                    action=teleop_action,
+                    compress_images=display_compressed_images,
+                )
 
-            print("\n" + "-" * (display_len + 10))
-            print(f"{'NAME':<{display_len}} | {'NORM':>7}")
-            # Display the final robot action that was sent
-            for motor, value in robot_action_to_send.items():
-                print(f"{motor:<{display_len}} | {value:>7.2f}")
-            move_cursor_up(len(robot_action_to_send) + 3)
+                print("\n" + "-" * (display_len + 10))
+                print(f"{'NAME':<{display_len}} | {'NORM':>7}")
+                # Display the final robot action that was sent
+                for motor, value in robot_action_to_send.items():
+                    print(f"{motor:<{display_len}} | {value:>7.2f}")
+                move_cursor_up(len(robot_action_to_send) + 3)
 
-        work_s = time.perf_counter() - loop_start
-        precise_sleep(max(1 / fps - work_s, 0.0))
-        loop_s = time.perf_counter() - loop_start
-        if print_loop_timing:
+            dt_s = time.perf_counter() - loop_start
+            precise_sleep(max(1 / fps - dt_s, 0.0))
+            loop_s = time.perf_counter() - loop_start
             print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
             move_cursor_up(1)
 
-        now = time.perf_counter()
-        if now - last_status_t >= 0.5:
-            emit_runtime_event(
-                "teleoperation",
-                "running",
-                elapsed_s=now - start,
-                fps=1 / loop_s,
-                work_ms=work_s * 1e3,
-                observation_ms=observation_s * 1e3,
-                teleoperator_ms=teleoperator_s * 1e3,
-                command_ms=command_s * 1e3,
-                deadline_missed=work_s > 1 / fps,
-                control_source="teleoperation",
-            )
-            last_status_t = now
+            now = time.perf_counter()
+            if now - last_status_t >= 0.5:
+                emit_runtime_event(
+                    "teleoperation",
+                    "running",
+                    elapsed_s=now - start,
+                    fps=1 / loop_s,
+                    control_source="teleoperation",
+                )
+                last_status_t = now
 
-        if "stop" in take_runtime_commands():
-            return
+            if "stop" in take_runtime_commands():
+                return
 
-        if duration is not None and now - start >= duration:
-            return
+            if duration is not None and now - start >= duration:
+                return
 
 
 @parser.wrap()
@@ -313,8 +296,6 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
-            read_observation=cfg.read_observation,
-            print_loop_timing=cfg.print_loop_timing,
         )
     except KeyboardInterrupt:
         pass

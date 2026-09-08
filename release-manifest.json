@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "release_id": "519cf031-lr061-t211-cu128-b1",
+  "created_at": "2026-09-04T00:12:50+08:00",
+  "source": {
+    "branch": "main",
+    "commit": "519cf031e1ccb0c6ae6097541ef8e272153eb66d",
+    "upstream_base": "13036fa89a3df846b86e7996d8158232c5c30c32",
+    "pushed": false,
+    "archive_sha256": "0b309545cd5ab6919afc19ddb3cd8e3a73e964ee82bb6882a4a8d023bcf1face",
+    "web_archive_sha256": "a75881be16318e0462f64bed5065c5c6b4d1b2e5560487f122d457209601987f"
+  },
+  "runtime": {
+    "python": "3.12.13",
+    "lerobot": "0.6.1",
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "transformers": "5.5.4",
+    "tokenizers": "0.22.2",
+    "accelerate": "1.14.0",
+    "safetensors": "0.8.0",
+    "numpy": "2.2.6",
+    "cuda_runtime": "12.8",
+    "cudnn": 91900,
+    "piper_sdk": "0.6.2"
+  },
+  "validation": {
+    "host": "4090-b",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "tests": "120 passed, 1 skipped, 1 deselected",
+    "web_http": 200,
+    "policy_compatibility": true,
+    "policy_preload": true,
+    "policy_type": "pi05",
+    "model_allocated_bytes": 9356018688
+  }
+}

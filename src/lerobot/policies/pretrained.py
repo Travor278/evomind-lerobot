@@ -18,22 +18,15 @@ import builtins
 import dataclasses
 import logging
 import os
-from collections.abc import Callable, Mapping
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, TypedDict, TypeVar, Unpack
 
-import torch
 from huggingface_hub import HfApi, ModelCard, ModelCardData, hf_hub_download, save_torch_state_dict
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
 from huggingface_hub.errors import HfHubHTTPError
-from safetensors import safe_open
-from safetensors.torch import (
-    load_file as load_safetensor_file,
-    load_model as load_model_as_safetensor,
-    save_model as save_model_as_safetensor,
-)
+from safetensors.torch import load_model as load_model_as_safetensor, save_model as save_model_as_safetensor
 from torch import Tensor, nn
 
 from lerobot.__version__ import __version__
@@ -56,64 +49,6 @@ if TYPE_CHECKING:
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 
 T = TypeVar("T", bound="PreTrainedPolicy")
-
-
-def load_safetensors_into_meta_model(
-    model: nn.Module,
-    model_file: str | Path,
-    map_location: str,
-    *,
-    strict: bool,
-    remap_state_dict: Callable[[Mapping[str, Tensor]], Mapping[str, Tensor]],
-) -> nn.Module:
-    """Materialize a meta-initialized policy directly from a safetensors checkpoint.
-
-    ``load_state_dict(assign=True)`` makes checkpoint tensors become the module parameters instead of copying
-    them into separately initialized tensors. The state dict is loaded on its final device, and floating-point
-    tensors are converted only when the model's declared parameter dtype differs from the checkpoint.
-    """
-    expected_state = model.state_dict()
-    device = resolve_safetensors_device(map_location)
-    requires_dtype_conversion = any(
-        tensor.is_floating_point() and tensor.dtype != torch.float32 for tensor in expected_state.values()
-    )
-
-    if requires_dtype_conversion and device != "cpu":
-        # Stream one tensor at a time so mixed/bfloat16 policies never stage the whole FP32 checkpoint on GPU.
-        materialized_state = {}
-        with safe_open(model_file, framework="pt", device=device) as checkpoint:
-            for source_key in checkpoint.keys():  # noqa: SIM118 - safe_open is not iterable
-                source_tensor = checkpoint.get_tensor(source_key)
-                remapped = remap_state_dict({source_key: source_tensor})
-                converted_tensors: dict[torch.dtype, Tensor] = {}
-                for key, tensor in remapped.items():
-                    expected = expected_state.get(key)
-                    if expected is not None and tensor.is_floating_point() and tensor.dtype != expected.dtype:
-                        if expected.dtype not in converted_tensors:
-                            converted_tensors[expected.dtype] = tensor.to(dtype=expected.dtype)
-                        tensor = converted_tensors[expected.dtype]
-                    materialized_state[key] = tensor
-    else:
-        checkpoint_state = load_safetensor_file(model_file, device=device)
-        checkpoint_state = remap_state_dict(checkpoint_state)
-        materialized_state = {}
-        for key, tensor in checkpoint_state.items():
-            expected = expected_state.get(key)
-            if expected is not None and tensor.is_floating_point() and tensor.dtype != expected.dtype:
-                tensor = tensor.to(dtype=expected.dtype)
-            materialized_state[key] = tensor
-
-    incompatible = model.load_state_dict(materialized_state, strict=strict, assign=True)
-    log_model_loading_keys(incompatible.missing_keys, incompatible.unexpected_keys)
-
-    meta_keys = [key for key, tensor in model.state_dict().items() if tensor.is_meta]
-    meta_keys.extend(key for key, tensor in model.named_buffers() if tensor.is_meta and key not in meta_keys)
-    if meta_keys:
-        preview = ", ".join(meta_keys[:5])
-        remainder = f" (+{len(meta_keys) - 5} more)" if len(meta_keys) > 5 else ""
-        raise RuntimeError(f"Checkpoint left unmaterialized meta tensors: {preview}{remainder}")
-
-    return model
 
 
 def _build_card_context(

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -25,7 +25,7 @@ from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
 from lerobot.scripts.lerobot_record import RecordConfig, record
 from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
-from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleop_loop, teleoperate
+from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
 from tests.fixtures.constants import DUMMY_REPO_ID
 from tests.mocks.mock_robot import MockRobotConfig
 from tests.mocks.mock_teleop import MockTeleopConfig
@@ -46,32 +46,6 @@ def test_teleoperate():
         teleop_time_s=0.1,
     )
     teleoperate(cfg)
-
-
-def test_teleop_loop_can_skip_unused_follower_observation(monkeypatch):
-    import lerobot.scripts.lerobot_teleoperate as teleoperate_module
-
-    robot = MagicMock()
-    robot.name = "piperx_follower"
-    robot.action_features = {"joint_1.pos": float}
-    teleop = MagicMock()
-    teleop.get_action.return_value = {"joint_1.pos": 1.0}
-    monkeypatch.setattr(teleoperate_module, "precise_sleep", lambda _duration: None)
-    monkeypatch.setattr(teleoperate_module, "take_runtime_commands", lambda: {"stop"})
-
-    teleop_loop(
-        teleop=teleop,
-        robot=robot,
-        fps=30,
-        teleop_action_processor=lambda value: value[0],
-        robot_action_processor=lambda value: value[0],
-        robot_observation_processor=lambda value: value,
-        read_observation=False,
-        print_loop_timing=False,
-    )
-
-    robot.get_observation.assert_not_called()
-    robot.send_action.assert_called_once_with({"joint_1.pos": 1.0})
 
 
 def test_record_and_resume(tmp_path):

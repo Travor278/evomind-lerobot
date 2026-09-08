@@ -69,6 +69,10 @@ class InferenceEngine(abc.ABC):
     def get_action(self, obs_frame: dict | None) -> torch.Tensor | None:
         """Return the next action tensor, or ``None`` if unavailable."""
 
+    def recover(self) -> None:
+        """Discard inference state after a hardware interruption."""
+        self.reset()
+
     def notify_observation(self, obs: dict) -> None:  # noqa: B027
         """Publish the latest processed observation.  Default: no-op."""
 

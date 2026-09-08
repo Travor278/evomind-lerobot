@@ -206,23 +206,29 @@ class FeetechMotorsBus(SerialMotorsBus):
 
         raise RuntimeError(f"Motor '{motor}' (model '{model}') was not found. Make sure it is connected.")
 
-    def configure_motors(self, return_delay_time=0, maximum_acceleration=254, acceleration=254) -> None:
+    def configure_motors(
+        self,
+        return_delay_time=0,
+        maximum_acceleration=254,
+        acceleration=254,
+        num_retry: int = 0,
+    ) -> None:
         for motor in self.motors:
             # By default, Feetech motors have a 500µs delay response time (corresponding to a value of 250 on
             # the 'Return_Delay_Time' address). We ensure this is reduced to the minimum of 2µs (value of 0).
-            self.write("Return_Delay_Time", motor, return_delay_time)
+            self.write("Return_Delay_Time", motor, return_delay_time, num_retry=num_retry)
             # Set 'Maximum_Acceleration' to 254 to speedup acceleration and deceleration of the motors.
             if self.protocol_version == 0:
-                self.write("Maximum_Acceleration", motor, maximum_acceleration)
-            self.write("Acceleration", motor, acceleration)
+                self.write("Maximum_Acceleration", motor, maximum_acceleration, num_retry=num_retry)
+            self.write("Acceleration", motor, acceleration, num_retry=num_retry)
 
             # Clear bit 4 (0x10) of the Phase register (0x12) to set angle feedback mode to 0.
             # This forces position readings to be in the range [0, resolution - 1] and prevents overflow or negative values.
             # Only known to be necessary for the STS3215.
             if self.motors[motor].model == "sts3215":
-                phase = self.read("Phase", motor, normalize=False)
+                phase = self.read("Phase", motor, normalize=False, num_retry=num_retry)
                 if phase & 0x10:
-                    self.write("Phase", motor, phase & ~0x10)
+                    self.write("Phase", motor, phase & ~0x10, num_retry=num_retry)
 
     @property
     def is_calibrated(self) -> bool:
@@ -289,9 +295,26 @@ class FeetechMotorsBus(SerialMotorsBus):
         return half_turn_homings
 
     def disable_torque(self, motors: int | str | list[str] | None = None, num_retry: int = 0) -> None:
-        for motor in self._get_motors_list(motors):
-            self.write("Torque_Enable", motor, TorqueMode.DISABLED.value, num_retry=num_retry)
-            self.write("Lock", motor, 0, num_retry=num_retry)
+        motor_names = self._get_motors_list(motors)
+        try:
+            for motor in motor_names:
+                self.write("Torque_Enable", motor, TorqueMode.DISABLED.value, num_retry=num_retry)
+                self.write("Lock", motor, 0, num_retry=num_retry)
+        except (ConnectionError, RuntimeError) as error:
+            # A servo can receive a write successfully while its status packet is
+            # lost.  During shutdown, retrying the same request/response write is
+            # therefore not sufficient and can leave the serial port open.  Fall
+            # back to group writes, which do not wait for individual status
+            # packets and make a best effort to release every selected motor.
+            logger.warning(
+                "Confirmed torque-disable write failed (%s); falling back to group writes for %s",
+                error,
+                motor_names,
+            )
+            disabled = dict.fromkeys(motor_names, TorqueMode.DISABLED.value)
+            unlocked = dict.fromkeys(motor_names, 0)
+            self.sync_write("Torque_Enable", disabled, normalize=False, num_retry=num_retry)
+            self.sync_write("Lock", unlocked, normalize=False, num_retry=num_retry)
 
     def _disable_torque(self, motor: int, model: str, num_retry: int = 0) -> None:
         addr, length = get_address(self.model_ctrl_table, model, "Torque_Enable")

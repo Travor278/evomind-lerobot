@@ -50,7 +50,25 @@ class SOFollowerConfig:
     # return a corrupted status packet ("Incorrect status packet!"), especially when several joints move
     # at once, which otherwise aborts the control loop. Retries are immediate (no sleep) and only happen on
     # failure, so the steady-state read cost is unchanged.
-    num_read_retries: int = 2
+    num_read_retries: int = 7
+
+    # Number of extra attempts for acknowledged register writes during startup. A dropped status packet
+    # should not abort teleoperation while configuring torque, lock, PID, or other motor settings.
+    num_write_retries: int = 5
+
+    # Rebuild the serial transport after the normal packet retries are exhausted. Recreating the
+    # Feetech SDK objects is more reliable than reopening a wedged PortHandler in place. Recovery is
+    # bounded so an unplugged arm still fails safe instead of blocking shutdown forever.
+    read_reconnect_attempts: int = 12
+    read_reconnect_backoff_s: float = 0.1
+    read_reconnect_max_backoff_s: float = 1.0
+    # Recovery needs a sequence of valid, nearly stationary reads, not one reply.
+    read_reconnect_stable_reads: int = 10
+    read_reconnect_stable_interval_s: float = 0.05
+    read_reconnect_stable_max_delta: float = 3.0
+    read_reconnect_max_events: int = 3
+    read_reconnect_window_s: float = 60.0
+    read_reconnect_resume_max_delta: float = 3.0
 
 
 @RobotConfig.register_subclass("so101_follower")

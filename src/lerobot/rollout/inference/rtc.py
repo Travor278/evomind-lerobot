@@ -152,6 +152,7 @@ class RTCInferenceEngine(InferenceEngine):
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
         self._obs_lock = Lock()
+        self._inference_lock = Lock()
         self._policy_active = Event()
         self._compile_warmup_done = Event()
         self._shutdown_event = Event()
@@ -240,22 +241,38 @@ class RTCInferenceEngine(InferenceEngine):
         """Pause the RTC background thread."""
         logger.info("Pausing RTC inference thread")
         self._policy_active.clear()
+        if not self._inference_lock.acquire(timeout=5.0):
+            raise TimeoutError("RTC did not quiesce within 5 seconds; refusing recovery/handover")
+        self._inference_lock.release()
 
     def resume(self) -> None:
         """Resume the RTC background thread."""
         logger.info("Resuming RTC inference thread")
         self._policy_active.set()
 
+    def recover(self) -> None:
+        """Drain in-flight inference before clearing the queue and restarting."""
+        active = self._policy_active.is_set()
+        thread = self._rtc_thread
+        self.stop()
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("RTC inference did not stop; refusing to resume stale actions")
+        self.reset()
+        self.start()
+        if active:
+            self.resume()
+
     def reset(self) -> None:
         """Reset the policy, processors, action queue, and cached observation."""
         logger.info("Resetting RTC inference state (policy + processors + queue + observation)")
-        self._policy.reset()
-        self._preprocessor.reset()
-        self._postprocessor.reset()
-        if self._action_queue is not None:
-            self._action_queue.clear()
-        with self._obs_lock:
-            self._obs_holder["obs"] = None
+        with self._inference_lock:
+            self._policy.reset()
+            self._preprocessor.reset()
+            self._postprocessor.reset()
+            if self._action_queue is not None:
+                self._action_queue.clear()
+            with self._obs_lock:
+                self._obs_holder["obs"] = None
 
     # ------------------------------------------------------------------
     # Action production (called from main thread)
@@ -300,13 +317,20 @@ class RTCInferenceEngine(InferenceEngine):
                     continue
 
                 if queue.qsize() <= self._rtc_queue_threshold:
+                    self._inference_lock.acquire()
                     try:
+                        if not self._policy_active.is_set() or self._shutdown_event.is_set():
+                            continue
+                        with self._obs_lock:
+                            obs = self._obs_holder.get("obs")
+                        if obs is None:
+                            continue
                         current_time = time.perf_counter()
                         idx_before = queue.get_action_index()
                         prev_actions = queue.get_left_over()
 
-                        # Padding an exhausted queue with zeros would guide the
-                        # next chunk toward a false zero-action prefix.
+                        # An exhausted queue has no valid prefix. Padding an empty tensor
+                        # with zeros would incorrectly guide the next chunk toward zero.
                         has_rtc_prefix = _has_rtc_prefix(prev_actions)
                         if not has_rtc_prefix:
                             prev_actions = None
@@ -363,11 +387,16 @@ class RTCInferenceEngine(InferenceEngine):
                         elif has_rtc_prefix:
                             latency_tracker.add(new_latency)
                         else:
+                            # The first eager inference includes one-time CUDA/kernel setup
+                            # and happens while the robot has no action chunk to execute.
+                            # Do not let that cold-start outlier poison later RTC delays.
                             logger.info(
                                 "RTC priming inference latency=%.2fs excluded from delay tracking",
                                 new_latency,
                             )
 
+                        if not self._policy_active.is_set() or self._shutdown_event.is_set():
+                            continue
                         queue.merge(original, processed, new_delay, idx_before)
 
                         if (
@@ -393,6 +422,8 @@ class RTCInferenceEngine(InferenceEngine):
                             # Persistent failure: stop retrying and propagate shutdown.
                             raise
                         time.sleep(_RTC_ERROR_RETRY_DELAY_S)
+                    finally:
+                        self._inference_lock.release()
                 else:
                     time.sleep(_RTC_IDLE_SLEEP_S)
 

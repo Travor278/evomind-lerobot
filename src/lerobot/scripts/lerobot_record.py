@@ -153,6 +153,7 @@ from lerobot.teleoperators import (  # noqa: F401
 from lerobot.teleoperators.keyboard import KeyboardTeleop
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
+from lerobot.utils.hardware_recovery import hardware_frame
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.keyboard_input import init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
@@ -282,102 +283,105 @@ def record_loop(
     start_episode_t = time.perf_counter()
     last_status_t = start_episode_t
     while timestamp < control_time_s:
-        start_loop_t = time.perf_counter()
+        with hardware_frame("recording") as hardware_status:
+            start_loop_t = time.perf_counter()
 
-        commands = take_runtime_commands()
-        if "stop" in commands:
-            events["stop_recording"] = True
-            events["exit_early"] = True
-        elif "rerecord_episode" in commands:
-            events["rerecord_episode"] = True
-            events["exit_early"] = True
-        elif "finish_episode" in commands:
-            events["exit_early"] = True
+            commands = take_runtime_commands()
+            if "stop" in commands:
+                events["stop_recording"] = True
+                events["exit_early"] = True
+            elif "rerecord_episode" in commands:
+                events["rerecord_episode"] = True
+                events["exit_early"] = True
+            elif "finish_episode" in commands:
+                events["exit_early"] = True
 
-        if events["exit_early"]:
-            events["exit_early"] = False
-            break
+            if events["exit_early"]:
+                events["exit_early"] = False
+                break
 
-        # Get robot observation
-        obs = robot.get_observation()
+            # Get robot observation
+            obs = robot.get_observation()
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
+            # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+            obs_processed = robot_observation_processor(obs)
 
-        if dataset is not None:
-            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+            if dataset is not None:
+                observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        # Get action from teleop
-        if isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
-            if robot.name == "unitree_g1":
-                teleop.send_feedback(obs)
+            # Get action from teleop
+            if isinstance(teleop, Teleoperator):
+                act = teleop.get_action()
+                if robot.name == "unitree_g1":
+                    teleop.send_feedback(obs)
 
-            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
-            act_processed_teleop = teleop_action_processor((act, obs))
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+                # Applies a pipeline to the raw teleop action, default is IdentityProcessor
+                act_processed_teleop = teleop_action_processor((act, obs))
+                action_values = act_processed_teleop
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
-        elif isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
-            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
-            keyboard_action = teleop_keyboard.get_action()
-            base_action = robot._from_keyboard_to_base_action(keyboard_action)
-            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
-            act_processed_teleop = teleop_action_processor((act, obs))
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
-        else:
-            no_action_count += 1
-            if no_action_count == 1 or no_action_count % 10 == 0:
-                logging.warning(
-                    "No teleoperator provided, skipping action generation. "
-                    "This is likely to happen when resetting the environment without a teleop device. "
-                    "The robot won't be at its rest position at the start of the next episode."
+            elif isinstance(teleop, list):
+                arm_action = teleop_arm.get_action()
+                arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+                keyboard_action = teleop_keyboard.get_action()
+                base_action = robot._from_keyboard_to_base_action(keyboard_action)
+                act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+                act_processed_teleop = teleop_action_processor((act, obs))
+                action_values = act_processed_teleop
+                robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+            else:
+                no_action_count += 1
+                if no_action_count == 1 or no_action_count % 10 == 0:
+                    logging.warning(
+                        "No teleoperator provided, skipping action generation. "
+                        "This is likely to happen when resetting the environment without a teleop device. "
+                        "The robot won't be at its rest position at the start of the next episode."
+                    )
+                continue
+
+            # Send action to robot
+            # Action can eventually be clipped using `max_relative_target`,
+            # so action actually sent is saved in the dataset. action = postprocessor.process(action)
+            # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+            _sent_action = robot.send_action(robot_action_to_send)
+
+            # Write to dataset
+            if dataset is not None:
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                frame = {**observation_frame, **action_frame, "task": single_task}
+                dataset.add_frame(frame)
+
+            if display_data:
+                log_visualization_data(
+                    display_mode,
+                    observation=obs_processed,
+                    action=action_values,
+                    compress_images=display_compressed_images,
                 )
-            continue
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+            dt_s = time.perf_counter() - start_loop_t
 
-        # Write to dataset
-        if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
-            dataset.add_frame(frame)
+            sleep_time_s: float = control_interval - dt_s
+            if sleep_time_s < 0:
+                logging.warning(
+                    f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+                )
 
-        if display_data:
-            log_visualization_data(
-                display_mode,
-                observation=obs_processed,
-                action=action_values,
-                compress_images=display_compressed_images,
-            )
+            precise_sleep(max(sleep_time_s, 0.0))
 
-        dt_s = time.perf_counter() - start_loop_t
-
-        sleep_time_s: float = control_interval - dt_s
-        if sleep_time_s < 0:
-            logging.warning(
-                f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
-            )
-
-        precise_sleep(max(sleep_time_s, 0.0))
-
-        now = time.perf_counter()
-        timestamp = now - start_episode_t
-        if now - last_status_t >= 0.5:
-            emit_runtime_event(
-                "recording",
-                "running" if dataset is not None else "resetting",
-                elapsed_s=timestamp,
-                fps=1 / max(time.perf_counter() - start_loop_t, 1e-9),
-                control_source="teleoperation",
-            )
-            last_status_t = now
+            now = time.perf_counter()
+            timestamp = now - start_episode_t
+            if now - last_status_t >= 0.5:
+                emit_runtime_event(
+                    "recording",
+                    "running" if dataset is not None else "resetting",
+                    elapsed_s=timestamp,
+                    fps=1 / max(time.perf_counter() - start_loop_t, 1e-9),
+                    control_source="teleoperation",
+                )
+                last_status_t = now
+        if hardware_status.recovered:
+            timestamp = time.perf_counter() - start_episode_t
 
 
 @parser.wrap()
