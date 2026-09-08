@@ -45,6 +45,7 @@ Teleoperator handover:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import enum
 import logging
 import time
@@ -64,7 +65,7 @@ from lerobot.datasets.utils import DEFAULT_VIDEO_FILE_SIZE_IN_MB
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame
 from lerobot.utils.keyboard_input import create_key_listener
-from lerobot.utils.pedal import start_pedal_listener
+from lerobot.utils.pedal import pedal_key, pedal_status, resolve_pedal_device, start_pedal_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import (
     emit_runtime_event,
@@ -101,6 +102,9 @@ class DAggerPhase(enum.Enum):
 
 # Valid (current_phase, event) -> next_phase
 _DAGGER_TRANSITIONS: dict[tuple[DAggerPhase, str], DAggerPhase] = {
+    (DAggerPhase.AUTONOMOUS, "pedal"): DAggerPhase.PAUSED,
+    (DAggerPhase.PAUSED, "pedal"): DAggerPhase.CORRECTING,
+    (DAggerPhase.CORRECTING, "pedal"): DAggerPhase.AUTONOMOUS,
     (DAggerPhase.AUTONOMOUS, "pause_resume"): DAggerPhase.PAUSED,
     (DAggerPhase.PAUSED, "pause_resume"): DAggerPhase.AUTONOMOUS,
     (DAggerPhase.PAUSED, "correction"): DAggerPhase.CORRECTING,
@@ -123,6 +127,9 @@ class DAggerEvents:
         # Session-level flags
         self.stop_recording = Event()
         self.upload_requested = Event()
+        self.resetting = Event()
+        self.skip_reset = Event()
+        self.transitioning = Event()
 
     # -- Thread-safe phase access ------------------------------------------
 
@@ -144,6 +151,8 @@ class DAggerEvents:
         from the current phase, preventing impossible state changes.
         """
         with self._lock:
+            if self.transitioning.is_set():
+                return
             if (self._phase, event) in _DAGGER_TRANSITIONS:
                 self._pending_transition = event
 
@@ -218,6 +227,12 @@ def _init_dagger_pedal(events: DAggerEvents, cfg: DAggerPedalConfig):
     }
 
     def on_press(code: str) -> None:
+        if cfg.cycle is not None and cfg.cycle in ("*", code):
+            if events.resetting.is_set():
+                events.skip_reset.set()
+            else:
+                events.request_transition("pedal")
+            return
         if code in code_to_event:
             events.request_transition(code_to_event[code])
         if code == cfg.upload:
@@ -254,6 +269,8 @@ class DAggerStrategy(RolloutStrategy):
         self._listener = None
         self._pedal_thread = None
         self._events = DAggerEvents()
+        self._last_pedal_status = None
+        self._handover_error: str | None = None
         self._push_executor: ThreadPoolExecutor | None = None
         self._pending_push: Future | None = None
         self._needs_push = Event()
@@ -268,11 +285,19 @@ class DAggerStrategy(RolloutStrategy):
             ctx.data.dataset_features, ctx.runtime.cfg.fps, target_size_mb=target_mb
         )
 
-        if not runtime_bridge_active():
-            if self.config.input_device == "keyboard":
-                self._listener = _init_dagger_keyboard(self._events, self.config.keyboard)
-            else:
-                self._pedal_thread = _init_dagger_pedal(self._events, self.config.pedal)
+        if not runtime_bridge_active() and self.config.input_device == "keyboard":
+            self._listener = _init_dagger_keyboard(self._events, self.config.keyboard)
+
+        # Embedded runtimes disable desktop keyboard hooks, not the dedicated pedal.
+        device = resolve_pedal_device()
+        if self.config.input_device == "pedal":
+            pedal_config = self.config.pedal
+        elif device:
+            pedal_config = dataclasses.replace(self.config.pedal, device_path=device, cycle=pedal_key())
+        else:
+            pedal_config = None
+        if pedal_config is not None:
+            self._pedal_thread = _init_dagger_pedal(self._events, pedal_config)
 
         record_mode = "all frames (sentry-like)" if self.config.record_autonomous else "corrections only"
         logger.info(
@@ -292,11 +317,22 @@ class DAggerStrategy(RolloutStrategy):
 
     def _take_runtime_transitions(self) -> None:
         """Route web controls through the same validated DAgger state machine."""
+        if self._pedal_status_changed():
+            self._emit_phase(self._events.phase)
         commands = take_runtime_commands()
         if "pause_resume" in commands:
             self._events.request_transition("pause_resume")
         if "correction" in commands:
             self._events.request_transition("correction")
+        if "pedal" in commands:
+            self._events.request_transition("pedal")
+
+    def _pedal_status_changed(self) -> bool:
+        status = pedal_status(self._pedal_thread)
+        if status == self._last_pedal_status:
+            return False
+        self._last_pedal_status = status
+        return True
 
     def _emit_phase(self, phase: DAggerPhase) -> None:
         emit_runtime_event(
@@ -306,6 +342,9 @@ class DAggerStrategy(RolloutStrategy):
             rollout_phase=phase.value,
             records_data=True,
             record_autonomous=self.config.record_autonomous,
+            pedal=pedal_status(self._pedal_thread),
+            handover_in_progress=self._events.transitioning.is_set(),
+            handover_error=self._handover_error,
         )
 
     def teardown(self, ctx: RolloutContext) -> None:
@@ -317,6 +356,8 @@ class DAggerStrategy(RolloutStrategy):
         if self._listener is not None:
             logger.info("Stopping keyboard listener")
             self._listener.stop()
+        if self._pedal_thread is not None:
+            self._pedal_thread.stop()
 
         # Flush any queued/running push cleanly
         if self._push_executor is not None:
@@ -406,7 +447,7 @@ class DAggerStrategy(RolloutStrategy):
                             ctx,
                             last_action,
                         )
-                        self._emit_phase(new_phase)
+                        self._emit_phase(self._events.phase)
                         if new_phase == DAggerPhase.AUTONOMOUS:
                             last_action = None
 
@@ -571,12 +612,12 @@ class DAggerStrategy(RolloutStrategy):
                             ctx,
                             last_action,
                         )
-                        self._emit_phase(new_phase)
+                        self._emit_phase(self._events.phase)
                         if new_phase == DAggerPhase.AUTONOMOUS:
                             last_action = None
 
                         # Correction ended -> save episode (blocking if not streaming)
-                        if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
+                        if old_phase == DAggerPhase.CORRECTING and new_phase != DAggerPhase.CORRECTING:
                             with self._episode_lock:
                                 save_episode_and_emit(dataset, ctx, strategy="dagger_corrections")
                             recorded += 1
@@ -663,6 +704,21 @@ class DAggerStrategy(RolloutStrategy):
 
     def _apply_transition(
         self,
+        old_phase,
+        new_phase,
+        engine,
+        interpolator,
+        ctx,
+        prev_action,
+    ) -> None:
+        self._events.transitioning.set()
+        try:
+            self._perform_transition(old_phase, new_phase, engine, interpolator, ctx, prev_action)
+        finally:
+            self._events.transitioning.clear()
+
+    def _perform_transition(
+        self,
         old_phase: DAggerPhase,
         new_phase: DAggerPhase,
         engine,
@@ -698,8 +754,10 @@ class DAggerStrategy(RolloutStrategy):
         if old_phase == DAggerPhase.AUTONOMOUS and new_phase == DAggerPhase.PAUSED:
             logger.info("Pausing engine - robot holds position")
             engine.pause()
+            self._handover_error = None
+            self._emit_phase(DAggerPhase.PAUSED)
 
-            if self.config.smooth_handover and teleop_supports_feedback(teleop) and prev_action is not None:
+            if self.config.smooth_handover and teleop_supports_feedback(teleop):
                 # TODO(Maxime): prev_action is in robot action key space (output of robot_action_processor).
                 # send_feedback expects teleop feedback key space. For homogeneous setups (e.g. SO-101
                 # leader + SO-101 follower) the keys are identical so this works. If the processor pipeline
@@ -707,15 +765,27 @@ class DAggerStrategy(RolloutStrategy):
                 # teleop_smooth_move_to silently no-ops and the arm doesn't move.
                 logger.info("Smooth handover: moving leader arm to follower position")
                 try:
-                    teleop_smooth_move_to(teleop, prev_action)
-                except Exception:
+                    target = prev_action
+                    if target is None:
+                        observed = robot.get_observation()
+                        target = {key: observed[key] for key in teleop.action_features}
+                    missing = set(teleop.action_features) - target.keys()
+                    if missing:
+                        raise ValueError(f"Cannot align leader: missing action keys {sorted(missing)}")
+                    teleop_smooth_move_to(teleop, target)
+                except Exception as error:
                     # A failed torque handover must not abort and finalize the
                     # rollout. Release both leaders and remain paused.
                     logger.exception("Smooth handover failed; releasing teleoperator and remaining paused")
+                    self._handover_error = str(error) or type(error).__name__
                     with contextlib.suppress(Exception):
                         teleop.disable_torque()
 
         elif old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
+            if self._handover_error is not None:
+                # Never start teleoperation from an unaligned pose after a failed sync.
+                self._events.phase = DAggerPhase.PAUSED
+                return
             logger.info("Entering correction mode - human teleop control")
             if (
                 self.config.smooth_handover
@@ -739,6 +809,7 @@ class DAggerStrategy(RolloutStrategy):
 
         elif new_phase == DAggerPhase.AUTONOMOUS:
             logger.info("Resuming autonomous mode - resetting engine and interpolator")
+            self._handover_error = None
             interpolator.reset()
             engine.reset()
             engine.resume()
