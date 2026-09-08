@@ -7,8 +7,8 @@ with the checkpoint's declared three 480×640 RGB views and 14-dimensional
 state, executes all 10 flow-matching inference steps, resets the action cache
 before every sample, and synchronizes CUDA around every measurement.
 
-Hardware: NVIDIA GeForce RTX 4090, driver 580.173.02, CUDA 12.8. The model uses
-eager attention and produces a 50-action chunk.
+Hardware: NVIDIA GeForce RTX 4090, driver 580.173.02. CUDA 12.6 and 12.8 were
+tested. The model uses eager attention and produces a 50-action chunk.
 
 | Environment | Precision | Compile | Load | First inference | P50 | P95 | Peak VRAM |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -19,6 +19,7 @@ eager attention and produces a 50-action chunk.
 | PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | BF16 | max-autotune | 71.2 s | 228.2 s | 75.3 ms | 75.6 ms | 8.92 GiB |
 | PyTorch 2.10.0, Transformers 5.3.0, cuDNN 91002 | FP32 | Off, meta assign | 3.8 s | 526 ms | 229.2 ms | 230.9 ms | 15.73 GiB |
 | PyTorch 2.11.0+cu128, Transformers 5.5.4, cuDNN 91900 | FP32 | Off, meta assign | 4.5 s | 438 ms | 229.2 ms | 232.5 ms | 15.73 GiB |
+| PyTorch 2.7.1+cu126, Transformers 5.3.0, cuDNN 90501 | FP32 | Off, meta assign | 13.7 s | 550 ms | 225.3 ms | 284.9 ms | 15.73 GiB |
 
 PyTorch 2.11 improves steady FP32 latency by only about 1.5% and BF16 latency
 by about 0.5%, so the framework minor version is not the primary bottleneck.
@@ -30,13 +31,25 @@ first action.
 The original `train_config.json` records FP32 training with AMP and compile both
 disabled. A fixed-seed action parity probe found that BF16 changed the final
 14-dimensional action by 0.0603 mean absolute error, 0.2385 maximum absolute
-error, and 0.3398 L2 error on one inference. PyTorch 2.10 and 2.11 also produce
-materially different fixed-seed actions even though their steady-state latency is
-nearly identical. The matching checkpoint artifacts on the validated 4090-a host
-explicitly select PyTorch 2.11, so the selected task baseline is PyTorch 2.11 +
-FP32 + eager attention with compile disabled. This is a validated inference
-selection; the exact training framework version was not preserved by
-`train_config.json`. BF16 remains opt-in until real-task success is validated.
+error, and 0.3398 L2 error on one inference.
+
+The large FP32 action difference originally attributed to the PyTorch version
+was isolated to Transformers instead. CPU and CUDA `torch.randn` outputs were
+byte-identical across PyTorch 2.7.1, 2.10, and 2.11. With Transformers 5.3,
+PyTorch 2.7.1 versus 2.10 produced only 0.000052 mean absolute action error, and
+PyTorch 2.10 versus 2.11 produced only 0.000003. Holding PyTorch 2.11 fixed and
+changing Transformers 5.3 to 5.5 produced 4.993 mean absolute and 9.226 maximum
+action error.
+
+Transformers 5.5 moved Gemma's `sqrt(hidden_size)` text scaling into
+`GemmaTextScaledWordEmbedding.forward`, and removed PaliGemma's corresponding
+image-feature division from `get_image_features`. LeRobot PI0.5 calls both the
+embedding layer and `get_image_features` directly instead of going through the
+standard Transformers forward path, so that refactor changes the feature scales
+seen by all ten flow-matching steps even though the network dimensions and
+checkpoint weights are unchanged. The validated 50k baseline is therefore
+Transformers 5.3 + FP32 + eager attention; its deployed matching environment is
+PyTorch 2.7.1+cu126. BF16 remains opt-in until real-task success is validated.
 
 Reproduce a row with:
 
