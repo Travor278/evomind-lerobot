@@ -97,9 +97,19 @@ def _resolve_local_tokenizer(pretrained_path: str | None) -> str | None:
     if not isinstance(tokenizer_name, str) or not tokenizer_name.strip():
         return None
     configured_name = tokenizer_name.strip()
+    local_candidates = [policy_dir / "tokenizer", policy_dir.parent / "tokenizer"]
+    for candidate in local_candidates:
+        if (candidate / "tokenizer_config.json").is_file():
+            resolved = str(candidate.resolve())
+            logger.info("Resolved tokenizer %s to checkpoint-local path %s", tokenizer_name, resolved)
+            return resolved
+
     configured = Path(configured_name).expanduser()
-    if configured.is_dir():
-        return None
+    try:
+        if configured.is_dir():
+            return None
+    except OSError:
+        logger.info("Configured tokenizer path is inaccessible and will be treated as stale: %s", configured)
     normalized_name = configured_name.replace("\\", "/").strip("/")
     basename = normalized_name.rsplit("/", 1)[-1]
     is_stale_path = (
@@ -107,9 +117,10 @@ def _resolve_local_tokenizer(pretrained_path: str | None) -> str | None:
     )
     registry_names = [basename] if is_stale_path else [normalized_name.replace("/", "--"), basename]
     lerobot_home = Path(os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")).expanduser()
-    candidates = [policy_dir / "tokenizer", policy_dir.parent / "tokenizer"]
-    candidates.extend(lerobot_home / "tokenizers" / name for name in dict.fromkeys(registry_names))
-    for candidate in candidates:
+    shared_candidates = [
+        lerobot_home / "tokenizers" / name for name in dict.fromkeys(registry_names)
+    ]
+    for candidate in shared_candidates:
         if (candidate / "tokenizer_config.json").is_file():
             resolved = str(candidate.resolve())
             logger.info("Resolved tokenizer %s to local path %s", tokenizer_name, resolved)
