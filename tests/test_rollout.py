@@ -114,6 +114,7 @@ def test_rtc_reset_invalidates_cached_observation():
     engine._postprocessor = MagicMock()
     engine._action_queue = MagicMock()
     engine._obs_lock = Lock()
+    engine._inference_lock = Lock()
     engine._obs_holder = {"obs": {"state": torch.tensor([1.0])}, "robot_type": "mock"}
 
     engine.reset()

@@ -42,10 +42,13 @@ lerobot-replay \
 """
 
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pformat
+
+import numpy as np
 
 from lerobot.configs import parser
 from lerobot.datasets import LeRobotDataset
@@ -88,8 +91,12 @@ class DatasetReplayConfig:
     episode: int
     # Root directory where the dataset will be stored (e.g. 'dataset/path'). If None, defaults to $HF_LEROBOT_HOME/repo_id.
     root: str | Path | None = None
-    # Limit the frames per second. By default, uses the policy fps.
-    fps: int = 30
+    # None preserves the dataset's recorded frame rate; an override changes playback speed.
+    fps: float | None = None
+
+    def __post_init__(self):
+        if self.fps is not None and (not math.isfinite(self.fps) or self.fps <= 0):
+            raise ValueError("Replay fps must be finite and positive")
 
 
 @dataclass
@@ -117,44 +124,96 @@ def replay(cfg: ReplayConfig):
     robot = make_robot_from_config(cfg.robot)
     dataset = LeRobotDataset(cfg.dataset.repo_id, root=cfg.dataset.root, episodes=[cfg.dataset.episode])
 
-    actions = dataset.select_columns(ACTION)
+    # Materialize only action vectors before connecting. No parquet row conversion,
+    # image decoding or observation read belongs in the replay control loop.
+    names = dataset.features[ACTION]["names"]
+    rows = dataset.select_columns(ACTION)
+    actions = np.asarray([np.asarray(row[ACTION]) for row in rows], dtype=np.float64)
+    if actions.ndim != 2 or actions.shape[1] != len(names) or not len(actions):
+        raise ValueError("Episode actions must be a non-empty [frames, action dimensions] array")
+    if not np.isfinite(actions).all():
+        raise ValueError("Episode contains non-finite actions")
+    if len(set(names)) != len(names) or set(names) != set(robot.action_features):
+        raise ValueError("Episode action names do not match the configured robot")
+    fps = cfg.dataset.fps if cfg.dataset.fps is not None else dataset.fps
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("Dataset replay fps must be finite and positive")
+    interval = 1 / fps
 
-    runtime_context = {"repo_id": cfg.dataset.repo_id, "episode": cfg.dataset.episode}
+    runtime_context = {
+        "repo_id": cfg.dataset.repo_id,
+        "episode": cfg.dataset.episode,
+        "target_fps": fps,
+        "dataset_fps": dataset.fps,
+    }
     emit_runtime_event("replay", "connecting", **runtime_context)
     robot.connect()
 
     try:
         log_say("Replaying episode", cfg.play_sounds, blocking=True)
-        emit_runtime_event("replay", "running", frame=0, total_frames=dataset.num_frames, **runtime_context)
+        emit_runtime_event("replay", "running", frame=0, total_frames=len(actions), **runtime_context)
         last_status_t = time.perf_counter()
-        for idx in range(dataset.num_frames):
+        deadline = last_status_t
+        started = last_status_t
+        sent_frames = 0
+        overruns = 0
+        stopped = False
+        first_send = None
+        last_send = started
+        for action_array in actions:
             if "stop" in take_runtime_commands():
+                stopped = True
                 break
-            start_episode_t = time.perf_counter()
+            precise_sleep(max(deadline - time.perf_counter(), 0.0))
+            if "stop" in take_runtime_commands():
+                stopped = True
+                break
+            action = dict(zip(names, action_array.tolist(), strict=True))
+            # The default processor is identity and requires no robot observation.
+            processed_action = robot_action_processor((action, {}))
 
-            action_array = actions[idx][ACTION]
-            action = {}
-            for i, name in enumerate(dataset.features[ACTION]["names"]):
-                action[name] = action_array[i]
-
-            robot_obs = robot.get_observation()
-
-            processed_action = robot_action_processor((action, robot_obs))
-
+            last_send = time.perf_counter()
+            if first_send is None:
+                first_send = last_send
             _ = robot.send_action(processed_action)
 
-            dt_s = time.perf_counter() - start_episode_t
-            precise_sleep(max(1 / dataset.fps - dt_s, 0.0))
+            sent_frames += 1
             now = time.perf_counter()
+            deadline += interval
+            if now > deadline:
+                # Rebase after slow hardware rather than sending catch-up bursts.
+                overruns += 1
+                deadline = now
             if now - last_status_t >= 0.5:
                 emit_runtime_event(
-                    "replay", "running", frame=idx + 1, total_frames=dataset.num_frames, **runtime_context
+                    "replay",
+                    "running",
+                    frame=sent_frames,
+                    total_frames=len(actions),
+                    elapsed_s=now - started,
+                    deadline_misses=overruns,
+                    effective_fps=(sent_frames - 1) / max(last_send - first_send, 1e-9),
+                    **runtime_context,
                 )
                 last_status_t = now
+        if not stopped:
+            # Let the final frame occupy its period before disconnecting the robot.
+            precise_sleep(max(deadline - time.perf_counter(), 0.0))
+        elapsed_s = time.perf_counter() - started
     finally:
         emit_runtime_event("replay", "stopping", **runtime_context)
         robot.disconnect()
-    emit_runtime_event("replay", "completed", total_frames=dataset.num_frames, **runtime_context)
+    emit_runtime_event(
+        "replay",
+        "completed",
+        frame=sent_frames,
+        total_frames=len(actions),
+        stopped=stopped,
+        deadline_misses=overruns,
+        elapsed_s=elapsed_s,
+        effective_fps=max(sent_frames - 1, 0) / max(last_send - (first_send or started), 1e-9),
+        **runtime_context,
+    )
 
 
 def main():

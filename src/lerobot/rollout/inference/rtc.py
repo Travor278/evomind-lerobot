@@ -152,6 +152,7 @@ class RTCInferenceEngine(InferenceEngine):
         self._action_queue: ActionQueue | None = None
         self._obs_holder: dict[str, Any] = {}
         self._obs_lock = Lock()
+        self._inference_lock = Lock()
         self._policy_active = Event()
         self._compile_warmup_done = Event()
         self._shutdown_event = Event()
@@ -240,6 +241,9 @@ class RTCInferenceEngine(InferenceEngine):
         """Pause the RTC background thread."""
         logger.info("Pausing RTC inference thread")
         self._policy_active.clear()
+        # Drain an in-flight chunk before the handover or processor reset.
+        with self._inference_lock:
+            pass
 
     def resume(self) -> None:
         """Resume the RTC background thread."""
@@ -249,13 +253,14 @@ class RTCInferenceEngine(InferenceEngine):
     def reset(self) -> None:
         """Reset the policy, processors, action queue, and cached observation."""
         logger.info("Resetting RTC inference state (policy + processors + queue + observation)")
-        self._policy.reset()
-        self._preprocessor.reset()
-        self._postprocessor.reset()
-        if self._action_queue is not None:
-            self._action_queue.clear()
-        with self._obs_lock:
-            self._obs_holder["obs"] = None
+        with self._inference_lock:
+            self._policy.reset()
+            self._preprocessor.reset()
+            self._postprocessor.reset()
+            if self._action_queue is not None:
+                self._action_queue.clear()
+            with self._obs_lock:
+                self._obs_holder["obs"] = None
 
     # ------------------------------------------------------------------
     # Action production (called from main thread)
@@ -300,99 +305,107 @@ class RTCInferenceEngine(InferenceEngine):
                     continue
 
                 if queue.qsize() <= self._rtc_queue_threshold:
-                    try:
-                        current_time = time.perf_counter()
-                        idx_before = queue.get_action_index()
-                        prev_actions = queue.get_left_over()
+                    with self._inference_lock:
+                        if not self._policy_active.is_set():
+                            continue
+                        # A reset may have replaced the observation while we waited.
+                        with self._obs_lock:
+                            obs = self._obs_holder.get("obs")
+                        if obs is None:
+                            continue
+                        try:
+                            current_time = time.perf_counter()
+                            idx_before = queue.get_action_index()
+                            prev_actions = queue.get_left_over()
 
-                        # Padding an exhausted queue with zeros would guide the
-                        # next chunk toward a false zero-action prefix.
-                        has_rtc_prefix = _has_rtc_prefix(prev_actions)
-                        if not has_rtc_prefix:
-                            prev_actions = None
+                            # Padding an exhausted queue with zeros would guide the
+                            # next chunk toward a false zero-action prefix.
+                            has_rtc_prefix = _has_rtc_prefix(prev_actions)
+                            if not has_rtc_prefix:
+                                prev_actions = None
 
-                        latency = latency_tracker.max()
-                        delay = _latency_to_delay_steps(
-                            latency,
-                            self._fps,
-                            self._rtc_config.execution_horizon,
-                        )
-
-                        obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
-                        obs_batch = prepare_observation_for_inference(
-                            obs_batch, policy_device, self._task, self._robot.robot_type
-                        )
-                        obs_batch["task"] = [self._task]
-
-                        preprocessed = self._preprocessor(obs_batch)
-
-                        if prev_actions is not None and self._relative_step is not None:
-                            # Rebase against the raw cached state so the leftover tail stays in
-                            # the training-time coordinate frame.
-                            raw_state = self._relative_step.get_cached_state()
-                            if raw_state is not None:
-                                prev_abs = queue.get_processed_left_over()
-                                if prev_abs is not None and prev_abs.numel() > 0:
-                                    prev_actions = reanchor_relative_rtc_prefix(
-                                        prev_actions_absolute=prev_abs,
-                                        current_state=raw_state,
-                                        relative_step=self._relative_step,
-                                        normalizer_step=self._normalizer_step,
-                                        policy_device=policy_device,
-                                    )
-
-                        if prev_actions is not None:
-                            prev_actions = _normalize_prev_actions_length(
-                                prev_actions, target_steps=self._rtc_config.execution_horizon
+                            latency = latency_tracker.max()
+                            delay = _latency_to_delay_steps(
+                                latency,
+                                self._fps,
+                                self._rtc_config.execution_horizon,
                             )
 
-                        actions = self._policy.predict_action_chunk(
-                            preprocessed, inference_delay=delay, prev_chunk_left_over=prev_actions
-                        )
+                            obs_batch = build_dataset_frame(self._hw_features, obs, prefix="observation")
+                            obs_batch = prepare_observation_for_inference(
+                                obs_batch, policy_device, self._task, self._robot.robot_type
+                            )
+                            obs_batch["task"] = [self._task]
 
-                        original = actions.squeeze(0).clone()
-                        processed = self._postprocessor(actions).squeeze(0)
-                        new_latency = time.perf_counter() - current_time
-                        new_delay = math.ceil(new_latency / time_per_chunk)
+                            preprocessed = self._preprocessor(obs_batch)
 
-                        inference_count += 1
-                        consecutive_errors = 0
-                        is_warmup = self._use_torch_compile and inference_count <= warmup_required
-                        if is_warmup:
-                            latency_tracker.reset()
-                        elif has_rtc_prefix:
-                            latency_tracker.add(new_latency)
-                        else:
-                            logger.info(
-                                "RTC priming inference latency=%.2fs excluded from delay tracking",
-                                new_latency,
+                            if prev_actions is not None and self._relative_step is not None:
+                                # Rebase against the raw cached state so the leftover tail stays in
+                                # the training-time coordinate frame.
+                                raw_state = self._relative_step.get_cached_state()
+                                if raw_state is not None:
+                                    prev_abs = queue.get_processed_left_over()
+                                    if prev_abs is not None and prev_abs.numel() > 0:
+                                        prev_actions = reanchor_relative_rtc_prefix(
+                                            prev_actions_absolute=prev_abs,
+                                            current_state=raw_state,
+                                            relative_step=self._relative_step,
+                                            normalizer_step=self._normalizer_step,
+                                            policy_device=policy_device,
+                                        )
+
+                            if prev_actions is not None:
+                                prev_actions = _normalize_prev_actions_length(
+                                    prev_actions, target_steps=self._rtc_config.execution_horizon
+                                )
+
+                            actions = self._policy.predict_action_chunk(
+                                preprocessed, inference_delay=delay, prev_chunk_left_over=prev_actions
                             )
 
-                        queue.merge(original, processed, new_delay, idx_before)
+                            original = actions.squeeze(0).clone()
+                            processed = self._postprocessor(actions).squeeze(0)
+                            new_latency = time.perf_counter() - current_time
+                            new_delay = math.ceil(new_latency / time_per_chunk)
 
-                        if (
-                            is_warmup
-                            and inference_count >= warmup_required
-                            and not self._compile_warmup_done.is_set()
-                        ):
-                            self._compile_warmup_done.set()
-                            logger.info("Compile warmup complete (%d inferences)", inference_count)
+                            inference_count += 1
+                            consecutive_errors = 0
+                            is_warmup = self._use_torch_compile and inference_count <= warmup_required
+                            if is_warmup:
+                                latency_tracker.reset()
+                            elif has_rtc_prefix:
+                                latency_tracker.add(new_latency)
+                            else:
+                                logger.info(
+                                    "RTC priming inference latency=%.2fs excluded from delay tracking",
+                                    new_latency,
+                                )
 
-                        logger.debug("RTC inference latency=%.2fs, queue=%d", new_latency, queue.qsize())
+                            queue.merge(original, processed, new_delay, idx_before)
 
-                    except Exception as e:
-                        consecutive_errors += 1
-                        logger.error(
-                            "RTC inference error (%d/%d): %s",
-                            consecutive_errors,
-                            _RTC_MAX_CONSECUTIVE_ERRORS,
-                            e,
-                        )
-                        logger.debug(traceback.format_exc())
-                        if consecutive_errors >= _RTC_MAX_CONSECUTIVE_ERRORS:
-                            # Persistent failure: stop retrying and propagate shutdown.
-                            raise
-                        time.sleep(_RTC_ERROR_RETRY_DELAY_S)
+                            if (
+                                is_warmup
+                                and inference_count >= warmup_required
+                                and not self._compile_warmup_done.is_set()
+                            ):
+                                self._compile_warmup_done.set()
+                                logger.info("Compile warmup complete (%d inferences)", inference_count)
+
+                            logger.debug("RTC inference latency=%.2fs, queue=%d", new_latency, queue.qsize())
+
+                        except Exception as e:
+                            consecutive_errors += 1
+                            logger.error(
+                                "RTC inference error (%d/%d): %s",
+                                consecutive_errors,
+                                _RTC_MAX_CONSECUTIVE_ERRORS,
+                                e,
+                            )
+                            logger.debug(traceback.format_exc())
+                            if consecutive_errors >= _RTC_MAX_CONSECUTIVE_ERRORS:
+                                # Persistent failure: stop retrying and propagate shutdown.
+                                raise
+                            time.sleep(_RTC_ERROR_RETRY_DELAY_S)
                 else:
                     time.sleep(_RTC_IDLE_SLEEP_S)
 

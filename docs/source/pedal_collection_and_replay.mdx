@@ -1,0 +1,53 @@
+# 脚踏板采集与离线回放验证
+
+## 操作
+
+- 人工采集：踩一次结束并保存当前段，然后进入不写数据的等待/复位阶段；再踩一次跳过等待，开始下一段。最后一段保存后直接结束。
+- Policy 采集的默认 `episodic_dagger` 策略：依次踩踏进入 `autonomous → paused → correcting → autonomous`。暂停时等待 RTC 当前推理结束，再复用 LeRobot 的主臂同步；人工干预帧标记 `intervention=true`，暂停阶段不写帧，恢复时清理动作队列和缓存观测。
+- `dagger_continuous` 和 `dagger_corrections` 也支持这个循环。原有多键脚踏板可通过 `strategy.pedal.cycle=null` 保留。
+- 主臂同步过程中忽略再次踩踏。同步失败保持暂停，不进入人工接管；网页显示错误，可以恢复 Policy 后再次暂停重试。
+
+普通按键仍保留原有含义。脚踏板只接受按下沿，过滤长按重复事件和 250 ms 内的触点抖动。每次采集结束关闭设备和监听，不让旧会话继续接收输入。
+
+## Linux 设备配置
+
+在启动 Evomind 的环境中设置专用脚踏板路径；不同模型的运行进程继承该设置：
+
+```bash
+export EVOMIND_PEDAL_DEVICE=/dev/input/by-id/<实际脚踏板>-event-kbd
+export EVOMIND_PEDAL_KEY=KEY_A  # 不设置时接受该专用设备的任意按键
+```
+
+也可使用 `/dev/input/evomind-pedal` 的稳定 udev 链接，或原有 PCsensor FootSwitch 默认路径。兼容旧的 `EVOMIND_DAGGER_PEDAL_DEVICE` / `EVOMIND_DAGGER_PEDAL_KEY`。不会自动选取普通键盘。
+
+CLI 人工采集可直接传 `--pedal_device=/dev/input/...`；DAgger 可传 `--strategy.input_device=pedal --strategy.pedal.device_path=/dev/input/...`。
+
+执行采集的解释器需要 `lerobot[hardware]`（Linux 下包含 evdev），且运行用户拥有该输入设备的访问权限。使用独占读取防止同一脚踏板按键又被键盘监听当作第二次输入；设备被占用或权限不足会返回 `pedal.state=unavailable` 和具体错误。连接变化通过运行事件返回，网页显示脚踏板状态。
+
+## 回放修正
+
+1. `DatasetReplayConfig.fps=None` 时使用数据集帧率；显式指定 fps 时真正按指定速率播放。此前这个配置字段没有生效。
+2. 在连接机器人前预读选中段的 action 列，检查有限值、维度和动作名称。保持动作顺序和值，不读取视频。
+3. 默认 action processor 是 identity，不再在每帧重复调用无用的 `robot.get_observation()`。
+4. 使用连续的控制截止时间吸收小量处理/状态上报开销；设备发送超过一帧周期时重设节拍，不突发补发历史动作。最后一帧保留自己的控制周期再断开设备。
+5. 状态包含 `target_fps`、`effective_fps`、`deadline_misses`、实际发送帧数和是否主动停止。网页显示目标与实测回放频率。
+6. 网站将选中数据集的真实 root 传给 LeRobot，避免根据同名 repo 重新寻找路径。
+
+## 离线证据
+
+脚踏板/采集/回放/RTC 的 68 项相关测试在 .166 的隔离源码目录全部通过，禁用 CUDA，不操作设备。前端类型检查及 Linux 构建通过。真实数据离线测试使用“插螺栓_5ab4ab24_20260905_113913”第 0 段的前 120 帧，发送端为只在内存中保存动作的虚拟机器人：
+
+| 目标 | 实测 | 间隔 P50 | 间隔 P95 |
+|---|---|---|---|
+| 30 FPS | 29.9985 FPS | 33.331 ms | 33.397 ms |
+| 15 FPS | 14.9997 FPS | 66.665 ms | 66.750 ms |
+
+两次动作值均逐项一致，没有连接相机、CAN 或串口。可复现：
+
+```bash
+python scripts/check_replay_offline.py /实际数据集目录 --episode 0 --frames 120 --fps 30 --output replay-check.json
+```
+
+这些测试验证软件节拍及动作序列，不等同于真机验证。LeRobot 存储的 timestamp 通常是按数据集 FPS 生成的名义时间轴，不能用它证明原采集控制循环也达到了该频率；若原采集实际偏慢，以名义 FPS 回放仍可能显得加速，不能未经证据自动改写历史数据。
+
+本次开发基于 main `1c1fb1d`。此前与 .166 比较后，Python/网页源码在规范换行后相同；差异主要是文档及两份后加入的 checkpoint 清单。离线验证目录为 `/home/zhaobo/pedal-replay-validation-20260909`，没有在测试中替换正在运行的服务。

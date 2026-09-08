@@ -2846,6 +2846,7 @@ all = [
     { name = "dm-tree", version = "0.1.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "dm-tree", version = "0.1.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
     { name = "dynamixel-sdk" },
+    { name = "evdev", marker = "sys_platform == 'linux'" },
     { name = "faker" },
     { name = "fastapi" },
     { name = "feetech-servo-sdk" },
@@ -2939,6 +2940,7 @@ core-scripts = [
     { name = "av" },
     { name = "datasets" },
     { name = "deepdiff" },
+    { name = "evdev", marker = "sys_platform == 'linux'" },
     { name = "foxglove-sdk" },
     { name = "jsonlines" },
     { name = "pandas" },
@@ -3001,6 +3003,9 @@ eo1 = [
 evaluation = [
     { name = "av" },
 ]
+evdev-dep = [
+    { name = "evdev", marker = "sys_platform == 'linux'" },
+]
 evo1 = [
     { name = "transformers" },
 ]
@@ -3038,6 +3043,7 @@ grpcio-dep = [
 ]
 hardware = [
     { name = "deepdiff" },
+    { name = "evdev", marker = "sys_platform == 'linux'" },
     { name = "pynput" },
     { name = "pyserial" },
 ]
@@ -3289,6 +3295,7 @@ requires-dist = [
     { name = "draccus", specifier = ">=0.11.6,<0.12.0" },
     { name = "dynamixel-sdk", marker = "extra == 'dynamixel'", specifier = ">=3.7.31,<3.9.0" },
     { name = "einops", specifier = ">=0.8.0,<0.9.0" },
+    { name = "evdev", marker = "sys_platform == 'linux' and extra == 'evdev-dep'", specifier = ">=1.7.1,<2.0" },
     { name = "faker", marker = "extra == 'sarm'", specifier = ">=33.0.0,<35.0.0" },
     { name = "fastapi", marker = "extra == 'console'", specifier = ">=0.115.0,<1.0.0" },
     { name = "fastapi", marker = "extra == 'phone'", specifier = "<1.0" },
@@ -3343,6 +3350,7 @@ requires-dist = [
     { name = "lerobot", extras = ["diffusers-dep"], marker = "extra == 'vla-jepa'" },
     { name = "lerobot", extras = ["diffusion"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["dynamixel"], marker = "extra == 'all'" },
+    { name = "lerobot", extras = ["evdev-dep"], marker = "extra == 'hardware'" },
     { name = "lerobot", extras = ["evo1"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["fastwam"], marker = "extra == 'all'" },
     { name = "lerobot", extras = ["feetech"], marker = "extra == 'all'" },
@@ -3503,7 +3511,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'console'", specifier = ">=0.34.0,<1.0.0" },
     { name = "wandb", marker = "extra == 'training'", specifier = ">=0.24.0,<0.28.0" },
 ]
-provides-extras = ["dataset", "training", "hardware", "viz", "core-scripts", "evaluation", "dataset-viz", "console", "piperx", "av-dep", "pygame-dep", "placo-dep", "transformers-dep", "grpcio-dep", "accelerate-dep", "can-dep", "peft-dep", "scipy-dep", "diffusers-dep", "qwen-vl-utils-dep", "matplotlib-dep", "pyserial-dep", "deepdiff-dep", "pynput-dep", "pyzmq-dep", "motorbridge-dep", "motorbridge-smart-servo-dep", "timm-dep", "feetech", "dynamixel", "damiao", "robstride", "openarms", "gamepad", "hopejr", "lekiwi", "unitree-g1", "reachy2", "rebot", "kinematics", "intelrealsense", "phone", "diffusion", "wallx", "pi", "molmoact2", "smolvla", "multi-task-dit", "groot", "sarm", "robometer", "topreward", "xvla", "eo1", "fastwam", "evo1", "hilserl", "vla-jepa", "lingbot-va", "async", "peft", "annotations", "dev", "notebook", "test", "video-benchmark", "aloha", "pusht", "libero", "metaworld", "all"]
+provides-extras = ["dataset", "training", "hardware", "viz", "core-scripts", "evaluation", "dataset-viz", "console", "piperx", "av-dep", "pygame-dep", "placo-dep", "transformers-dep", "grpcio-dep", "accelerate-dep", "can-dep", "peft-dep", "scipy-dep", "diffusers-dep", "qwen-vl-utils-dep", "matplotlib-dep", "pyserial-dep", "deepdiff-dep", "pynput-dep", "evdev-dep", "pyzmq-dep", "motorbridge-dep", "motorbridge-smart-servo-dep", "timm-dep", "feetech", "dynamixel", "damiao", "robstride", "openarms", "gamepad", "hopejr", "lekiwi", "unitree-g1", "reachy2", "rebot", "kinematics", "intelrealsense", "phone", "diffusion", "wallx", "pi", "molmoact2", "smolvla", "multi-task-dit", "groot", "sarm", "robometer", "topreward", "xvla", "eo1", "fastwam", "evo1", "hilserl", "vla-jepa", "lingbot-va", "async", "peft", "annotations", "dev", "notebook", "test", "video-benchmark", "aloha", "pusht", "libero", "metaworld", "all"]
 
 [[package]]
 name = "librt"

@@ -155,6 +155,7 @@ from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame, combine_feature_dicts
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.keyboard_input import init_keyboard_listener
+from lerobot.utils.pedal import pedal_key, pedal_status, resolve_pedal_device, start_pedal_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import emit_runtime_event, take_runtime_commands
 from lerobot.utils.utils import (
@@ -189,6 +190,8 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Optional dedicated Linux input device; also accepts EVOMIND_PEDAL_DEVICE.
+    pedal_device: str | None = None
 
     def __post_init__(self):
         if self.teleop is None:
@@ -285,6 +288,10 @@ def record_loop(
         start_loop_t = time.perf_counter()
 
         commands = take_runtime_commands()
+        pedal_press = events.get("_pedal_pressed")
+        if pedal_press is not None and pedal_press.is_set():
+            pedal_press.clear()
+            events["exit_early"] = True
         if "stop" in commands:
             events["stop_recording"] = True
             events["exit_early"] = True
@@ -376,6 +383,7 @@ def record_loop(
                 elapsed_s=timestamp,
                 fps=1 / max(time.perf_counter() - start_loop_t, 1e-9),
                 control_source="teleoperation",
+                pedal=pedal_status(events.get("_pedal_listener")),
             )
             last_status_t = now
 
@@ -437,6 +445,7 @@ def record(
 
     dataset = None
     listener = None
+    pedal_listener = None
 
     try:
         if cfg.resume:
@@ -497,6 +506,17 @@ def record(
         robot.connect()
 
         listener, events = init_keyboard_listener()
+        from threading import Event
+
+        events["_pedal_pressed"] = Event()
+        device = resolve_pedal_device(cfg.pedal_device)
+        if device:
+            key = pedal_key()
+            pedal_listener = start_pedal_listener(
+                lambda code: events["_pedal_pressed"].set() if key in ("*", code) else None,
+                device_path=device,
+            )
+        events["_pedal_listener"] = pedal_listener
 
         if not cfg.dataset.streaming_encoding:
             logging.info(
@@ -536,17 +556,40 @@ def record(
                     dataset.clear_episode_buffer()
                     break
 
+                rerecord = bool(events["rerecord_episode"])
+                events["rerecord_episode"] = False
+                if rerecord:
+                    dataset.clear_episode_buffer()
+                elif int(dataset.writer.episode_buffer["size"]) > 0:
+                    emit_runtime_event("recording", "saving", episode=dataset.num_episodes)
+                    saved_episode_index = dataset.num_episodes
+                    saved_episode_frames = int(dataset.writer.episode_buffer["size"])
+                    dataset.save_episode()
+                    recorded_episodes += 1
+                    emit_runtime_event(
+                        "recording",
+                        "running",
+                        stage="episode_saved",
+                        repo_id=cfg.dataset.repo_id,
+                        episode_index=saved_episode_index,
+                        frames=saved_episode_frames,
+                        fps=cfg.dataset.fps,
+                        duration_s=saved_episode_frames / cfg.dataset.fps,
+                        saved_episodes=recorded_episodes,
+                        target_episodes=cfg.dataset.num_episodes,
+                    )
+
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
                 if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                    (recorded_episodes < cfg.dataset.num_episodes) or rerecord
                 ):
                     log_say("Reset the environment", cfg.play_sounds)
                     emit_runtime_event(
                         "recording",
                         "resetting",
                         episode=dataset.num_episodes,
-                        rerecord_episode=bool(events["rerecord_episode"]),
+                        rerecord_episode=rerecord,
                         control_source="teleoperation",
                     )
 
@@ -564,31 +607,13 @@ def record(
                         display_mode=cfg.display_mode,
                     )
 
-                if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
-                    events["rerecord_episode"] = False
-                    events["exit_early"] = False
-                    dataset.clear_episode_buffer()
-                    continue
+                # Rerecord applies to the currently recorded segment, not an already saved one.
+                events["rerecord_episode"] = False
+                events["exit_early"] = False
 
-                emit_runtime_event("recording", "saving", episode=dataset.num_episodes)
-                saved_episode_index = dataset.num_episodes
-                saved_episode_frames = int(dataset.writer.episode_buffer["size"])
-                dataset.save_episode()
-                recorded_episodes += 1
-                emit_runtime_event(
-                    "recording",
-                    "running",
-                    stage="episode_saved",
-                    repo_id=cfg.dataset.repo_id,
-                    episode_index=saved_episode_index,
-                    frames=saved_episode_frames,
-                    fps=cfg.dataset.fps,
-                    duration_s=saved_episode_frames / cfg.dataset.fps,
-                    saved_episodes=recorded_episodes,
-                    target_episodes=cfg.dataset.num_episodes,
-                )
     finally:
+        if pedal_listener is not None:
+            pedal_listener.stop()
         emit_runtime_event("recording", "stopping")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 

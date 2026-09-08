@@ -21,7 +21,7 @@ type LocalPolicy = {
   id: string;
   path: string;
   type: string;
-  runtime?: { manifest?: { inference?: { rollout_backend?: InferenceBackend } } };
+  runtime?: { manifest?: { inference?: { rollout_backend?: InferenceBackend } } | null };
 };
 type TrendItem = { date: string; target_duration_s: number; actual_duration_s: number; episode_count: number };
 type ActiveSession = {

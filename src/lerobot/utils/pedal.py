@@ -15,26 +15,128 @@
 """Generic foot pedal listener using evdev.
 
 Callers supply a callback receiving the pressed key code (e.g. ``"KEY_A"``)
-and an optional device path.  The listener runs in a daemon thread and
-silently no-ops when :mod:`evdev` is not installed or the device is
-unavailable.  Strategy-specific key mapping logic lives in the caller.
+and a dedicated device path. The workflow owns the listener and stops it
+at teardown. Connection failures are available as structured status.
+Strategy-specific key mapping logic lives in the caller.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import select
 import threading
+import time
 from collections.abc import Callable
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PEDAL_DEVICE = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
 
 
+def resolve_pedal_device(device_path: str | None = None) -> str | None:
+    """Prefer explicit settings; never automatically capture a generic keyboard."""
+    configured = device_path or os.getenv("EVOMIND_PEDAL_DEVICE") or os.getenv("EVOMIND_DAGGER_PEDAL_DEVICE")
+    if configured:
+        return configured
+    for candidate in ("/dev/input/evomind-pedal", DEFAULT_PEDAL_DEVICE):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def pedal_key() -> str:
+    return os.getenv("EVOMIND_PEDAL_KEY", os.getenv("EVOMIND_DAGGER_PEDAL_KEY", "*"))
+
+
+class PedalPressFilter:
+    """One press per down/up cycle, excluding autorepeat and contact bounce."""
+
+    def __init__(self, debounce_s: float = 0.25):
+        self.debounce_s = debounce_s
+        self.held: set[str] = set()
+        self.last_press = float("-inf")
+
+    def accept(self, code: str, value: int, now: float) -> bool:
+        if value == 0:
+            self.held.discard(code)
+            return False
+        if value != 1 or code in self.held:
+            return False
+        self.held.add(code)
+        if now - self.last_press < self.debounce_s:
+            return False
+        self.last_press = now
+        return True
+
+
+class PedalListener(threading.Thread):
+    """A workflow-owned listener which can be stopped before the next session."""
+
+    def __init__(self, on_press: Callable[[str], None], device_path: str):
+        super().__init__(daemon=True, name="PedalListener")
+        self.on_press = on_press
+        self.device_path = device_path
+        self.stop_event = threading.Event()
+        self._status = {"state": "connecting", "device": device_path}
+        self._status_lock = threading.Lock()
+        self.device = None
+
+    @property
+    def status(self) -> dict:
+        with self._status_lock:
+            return dict(self._status)
+
+    def set_status(self, state: str, **details) -> None:
+        with self._status_lock:
+            self._status = {"state": state, "device": self.device_path, **details}
+
+    def run(self) -> None:
+        from evdev import categorize, ecodes
+
+        press_filter = PedalPressFilter()
+        try:
+            while not self.stop_event.is_set():
+                if not select.select([self.device], [], [], 0.1)[0]:
+                    continue
+                try:
+                    events = list(self.device.read())
+                except BlockingIOError:
+                    continue
+                for event in events:
+                    if self.stop_event.is_set():
+                        break
+                    if event.type != ecodes.EV_KEY:
+                        continue
+                    key = categorize(event)
+                    code = key.keycode
+                    if isinstance(code, list | tuple):
+                        code = code[0]
+                    if press_filter.accept(code, event.value, time.monotonic()):
+                        self.on_press(code)
+        except Exception as error:
+            self.set_status("disconnected", error=str(error))
+            logger.warning("Pedal disconnected: %s", error)
+        finally:
+            self.device.close()
+            if self.stop_event.is_set():
+                self.set_status("stopped")
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=1.0)
+
+
+def pedal_status(listener: PedalListener | None) -> dict:
+    return listener.status if listener is not None else {"state": "not_configured"}
+
+
 def start_pedal_listener(
     on_press: Callable[[str], None],
     device_path: str = DEFAULT_PEDAL_DEVICE,
-) -> threading.Thread | None:
+) -> PedalListener:
     """Spawn a daemon thread that forwards pedal key-press codes to ``on_press``.
 
     Parameters
@@ -48,36 +150,23 @@ def start_pedal_listener(
 
     Returns
     -------
-    The started daemon :class:`threading.Thread`, or ``None`` when
-    :mod:`evdev` is not installed (optional dependency; silent no-op).
+    A stoppable daemon listener. If the optional evdev dependency or device
+    is unavailable, its status explains the failure and no thread is started.
     """
+    listener = PedalListener(on_press, device_path)
     try:
-        from evdev import InputDevice, categorize, ecodes
-    except ImportError:
-        return None
+        from evdev import InputDevice
 
-    def pedal_reader() -> None:
-        try:
-            dev = InputDevice(device_path)
-            logger.info("Pedal connected: %s", dev.name)
-            for ev in dev.read_loop():
-                if ev.type != ecodes.EV_KEY:
-                    continue
-                key = categorize(ev)
-                code = key.keycode
-                if isinstance(code, (list, tuple)):
-                    code = code[0]
-                if key.keystate != 1:  # only key-down events
-                    continue
-                try:
-                    on_press(code)
-                except Exception as cb_err:  # pragma: no cover - defensive
-                    logger.warning("Pedal callback error: %s", cb_err)
-        except (FileNotFoundError, PermissionError):
-            pass
-        except Exception as e:
-            logger.warning("Pedal error: %s", e)
-
-    thread = threading.Thread(target=pedal_reader, daemon=True, name="PedalListener")
-    thread.start()
-    return thread
+        listener.device = InputDevice(device_path)
+        # A pedal often emulates an arrow/space key. Exclusive input prevents
+        # the keyboard listener from also consuming the same physical press.
+        listener.device.grab()
+        listener.set_status("connected", name=listener.device.name)
+    except (ImportError, OSError) as error:
+        if listener.device is not None:
+            listener.device.close()
+        listener.set_status("unavailable", error=str(error))
+        logger.warning("Pedal unavailable (%s): %s", device_path, error)
+        return listener
+    listener.start()
+    return listener

@@ -106,6 +106,7 @@ class PolicyPreloadRequest(BaseModel):
 class ReplayStartRequest(BaseModel):
     dataset_id: str = Field(min_length=1)
     episode: int = Field(default=0, ge=0)
+    fps: float | None = Field(default=None, gt=0, le=120)
 
 
 class RuntimeCommandRequest(BaseModel):
@@ -834,6 +835,8 @@ def _execute_replay(payload: dict[str, Any]) -> None:
             dataset=DatasetReplayConfig(
                 repo_id=dataset["id"],
                 episode=request.episode,
+                root=dataset["path"],
+                fps=request.fps,
             ),
             play_sounds=False,
         )

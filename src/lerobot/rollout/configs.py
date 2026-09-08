@@ -119,6 +119,9 @@ class DAggerPedalConfig:
     pause_resume: str = "KEY_A"
     correction: str = "KEY_B"
     upload: str = "KEY_C"
+    # One pedal cycles policy -> paused/aligned -> human correction -> policy.
+    # Set None to retain the legacy three-key pedal mapping.
+    cycle: str | None = "*"
 
 
 @RolloutStrategyConfig.register_subclass("episodic")

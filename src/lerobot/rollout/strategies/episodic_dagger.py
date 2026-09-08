@@ -26,6 +26,7 @@ import numpy as np
 from lerobot.datasets import VideoEncodingManager
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.utils.pedal import pedal_status
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.runtime_bridge import emit_runtime_event, take_runtime_commands
 from lerobot.utils.utils import log_say
@@ -141,6 +142,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
             and not ctx.runtime.shutdown_event.is_set()
         ):
             loop_started = time.perf_counter()
+            if self._pedal_status_changed():
+                self._emit_episode_phase(self._events.phase, episode, total_episodes)
             commands = take_runtime_commands()
 
             if "rerecord_episode" in commands:
@@ -151,12 +154,14 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                 self._events.request_transition("pause_resume")
             if "correction" in commands:
                 self._events.request_transition("correction")
+            if "pedal" in commands:
+                self._events.request_transition("pedal")
 
             transition = self._events.consume_transition()
             if transition is not None:
                 old_phase, new_phase = transition
                 self._apply_transition(old_phase, new_phase, engine, interpolator, ctx, last_action)
-                self._emit_episode_phase(new_phase, episode, total_episodes)
+                self._emit_episode_phase(self._events.phase, episode, total_episodes)
                 if new_phase == DAggerPhase.AUTONOMOUS:
                     last_action = None
 
@@ -250,6 +255,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
                 ctx,
                 last_action,
             )
+            if self._handover_error is not None:
+                raise RuntimeError(f"Cannot enter teleoperation reset: {self._handover_error}")
             self._events.phase = DAggerPhase.CORRECTING
 
     def _run_reset(
@@ -264,21 +271,29 @@ class EpisodicDAggerStrategy(DAggerStrategy):
         control_interval = 1.0 / ctx.runtime.cfg.fps
         started = time.perf_counter()
 
-        while (
-            time.perf_counter() - started < duration_s
-            and not ctx.runtime.shutdown_event.is_set()
-        ):
-            loop_started = time.perf_counter()
-            commands = take_runtime_commands()
-            if "finish_episode" in commands:
-                break
+        self._events.skip_reset.clear()
+        self._events.resetting.set()
+        try:
+            while (
+                time.perf_counter() - started < duration_s
+                and not ctx.runtime.shutdown_event.is_set()
+                and not self._events.stop_recording.is_set()
+                and not self._events.skip_reset.is_set()
+            ):
+                loop_started = time.perf_counter()
+                commands = take_runtime_commands()
+                if "finish_episode" in commands:
+                    break
 
-            obs = robot.get_observation()
-            teleop_action = teleop.get_action()
-            processed = ctx.processors.teleop_action_processor((teleop_action, obs))
-            robot_action = ctx.processors.robot_action_processor((processed, obs))
-            robot.send_action(robot_action)
-            precise_sleep(max(control_interval - (time.perf_counter() - loop_started), 0.0))
+                obs = robot.get_observation()
+                teleop_action = teleop.get_action()
+                processed = ctx.processors.teleop_action_processor((teleop_action, obs))
+                robot_action = ctx.processors.robot_action_processor((processed, obs))
+                robot.send_action(robot_action)
+                precise_sleep(max(control_interval - (time.perf_counter() - loop_started), 0.0))
+        finally:
+            self._events.resetting.clear()
+            self._events.skip_reset.clear()
 
     def _emit_episode_phase(self, phase: DAggerPhase, episode: int, total_episodes: int) -> None:
         emit_runtime_event(
@@ -290,6 +305,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
             total_episodes=total_episodes,
             records_data=True,
             record_autonomous=True,
+            pedal=pedal_status(self._pedal_thread),
+            handover_error=self._handover_error,
         )
 
     @staticmethod

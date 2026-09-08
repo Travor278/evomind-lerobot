@@ -1231,6 +1231,16 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
     || (kind === 'replay' && Boolean(selectedDataset));
   const canControlEpisode = runningThis && recordingPhase === 'running' && !pendingCommand;
   const canSkipReset = runningThis && recordingPhase === 'resetting' && !pendingCommand;
+  const pedalData = event?.data.pedal as { state?: string } | undefined;
+  const pedalLabels: Record<string, string> = { connected: '已连接', connecting: '连接中', unavailable: '不可用', disconnected: '已断开', not_configured: '未配置', stopped: '已停止' };
+  const pedalLabel = runningThis
+    ? (pedalLabels[pedalData?.state ?? ''] ?? '检测中')
+    : '开始采集后检测';
+  const pedalHelp = selectedTask?.collection_method !== 'policy'
+    ? '保存这一段 → 跳过等待，开始下一段。'
+    : ['episodic_dagger', 'dagger_continuous', 'dagger_corrections'].includes(selectedTask.rollout_strategy)
+      ? '暂停并同步主臂 → 人工干预采集 → 恢复 Policy；同步过程中请等待。'
+      : '当前策略不支持人工接管，请在任务中选择 DAgger 采集。';
   const storageRefreshKey = runtimeEvent?.data.stage === 'episode_saved' ? runtimeEvent.sequence : null;
   const residentPolicy = runtime.policy_residency;
   const selectedPolicyResident = residentPolicy?.state === 'ready' && residentPolicy.policy_path === effectivePolicyPath;
@@ -1266,6 +1276,8 @@ function WorkflowPage({ kind, configuration, workspace, runtimeEvent, storage, s
         <label className="full-field">任务描述<input value={task} onChange={(item) => setTask(item.target.value)} disabled={runningThis} placeholder="使用训练数据中的任务描述效果最稳定" /><small className="field-help">Checkpoint 不记录唯一任务描述；这里是本次推理传给模型的指令。</small></label>
       </div>{selectedPolicy && <PolicyRuntimeCard runtime={selectedPolicy.runtime} />}{policyControls}{policyInspection && <PolicyInspectionResult inspection={policyInspection} />}</WorkflowSection>}
       {kind === 'replay' && <><WorkflowSection title="回放来源"><div className="form-grid"><label className="full-field">数据集<select value={effectiveDatasetId} onChange={(item) => { setDatasetId(item.target.value); setEpisode(0); }} disabled={runningThis}>{workspace.datasets.length === 0 && <option value="">没有本地数据集</option>}{workspace.datasets.map((dataset) => <option value={dataset.id} key={dataset.id}>{dataset.id}</option>)}</select></label><label>Episode<input type="number" value={episode} onChange={(item) => setEpisode(Number(item.target.value))} disabled={runningThis} min="0" max={Math.max(0, (selectedDataset?.episodes ?? 1) - 1)} /></label></div></WorkflowSection><WorkflowSection title="执行设备">{followers.map((follower) => <div className="workflow-device" key={follower.id}><div><strong>{bindingTitle(follower.alias)}</strong><span>{serialIdentity(follower.id)}</span></div><i>已连接</i></div>)}</WorkflowSection></>}
+      {kind === 'recording' && <p className="field-help">脚踏板（{pedalLabel}）：{pedalHelp}</p>}
+      {runningThis && typeof event?.data.handover_error === 'string' && event.data.handover_error && <p className="compatibility-errors">主臂同步失败，已保持暂停：{event.data.handover_error}</p>}
       <div className="workflow-actions">{kind === 'replay' && <span>回放会直接驱动机械臂执行记录动作</span>}<div className={`workflow-command-buttons${runningThis && kind === 'recording' ? ' episode-controls' : ''}`}>
         {runningThis && kind === 'recording' && selectedTask?.collection_method === 'manual' && <><button className="primary" type="button" disabled={!canControlEpisode} onClick={() => void command('finish_episode')}>{pendingCommand === 'finish_episode' && recordingPhase !== 'resetting' ? '正在保存' : '保存这一段'}</button><button className="outline" type="button" disabled={!canControlEpisode} onClick={() => void command('rerecord_episode')}>{pendingCommand === 'rerecord_episode' ? '正在重录' : '重录这一段'}</button>{recordingPhase === 'resetting' && <button className="outline" type="button" disabled={!canSkipReset} onClick={() => void command('finish_episode')}>{pendingCommand === 'finish_episode' ? '正在跳过' : '跳过等待'}</button>}</>}
         {runningThis && kind === 'recording' && (selectedStrategy === 'episodic' || selectedStrategy === 'episodic_dagger') && <><button className="primary" type="button" disabled={Boolean(pendingCommand)} onClick={() => void command('finish_episode')}>{pendingCommand === 'finish_episode' ? '正在切换' : rolloutPhase === 'resetting' ? '跳过重置' : '结束本轮'}</button>{rolloutPhase !== 'resetting' && <button className="outline" type="button" disabled={Boolean(pendingCommand)} onClick={() => void command('rerecord_episode')}>{pendingCommand === 'rerecord_episode' ? '正在重录' : '重录本轮'}</button>}</>}
@@ -1348,7 +1360,7 @@ function WorkflowSummary({ kind, dataset, policy, policyPath, event, error }: { 
   }
   if (kind === 'recording') return <div className="workflow-summary"><SummaryItem label="采集状态" value={state} detail={event?.data.episode !== undefined ? `Episode ${String(event.data.episode)}${event.data.total_episodes !== undefined ? ` / ${String(event.data.total_episodes)}` : ''}` : event?.data.saved_episodes !== undefined ? `已保存 ${String(event.data.saved_episodes)} Episodes` : phaseDetail} />{errorDetails}</div>;
   if (kind === 'inference') return <div className="workflow-summary"><SummaryItem label="运行状态" value={state} detail={typeof event?.data.rollout_phase === 'string' ? String(event.data.rollout_phase) : phaseDetail} /><SummaryItem label="模型" value={policy?.id ?? (policyPath.split('/').slice(-2).join('/') || '未选择')} detail={policy ? `${policy.type} / 本地 checkpoint` : '本机未选择模型'} />{errorDetails}</div>;
-  return <div className="workflow-summary"><SummaryItem label="回放状态" value={state} detail={event?.data.frame !== undefined ? `${String(event.data.frame)} / ${String(event.data.total_frames ?? '—')} 帧` : phaseDetail} /><SummaryItem label={dataset ? dataset.id : '数据集'} value={dataset ? `${dataset.frames} 帧` : '未选择'} detail={dataset ? `${dataset.episodes} Episodes / ${dataset.fps || '—'} FPS` : '未发现本地数据集'} />{errorDetails}</div>;
+  return <div className="workflow-summary"><SummaryItem label="回放状态" value={state} detail={event?.data.frame !== undefined ? `${String(event.data.frame)} / ${String(event.data.total_frames ?? '—')} 帧` : phaseDetail} /><SummaryItem label={dataset ? dataset.id : '数据集'} value={dataset ? `${dataset.frames} 帧` : '未选择'} detail={dataset ? `${dataset.episodes} Episodes / ${dataset.fps || '—'} FPS` : '未发现本地数据集'} /><SummaryItem label="回放频率" value={typeof event?.data.effective_fps === 'number' ? `${event.data.effective_fps.toFixed(1)} FPS` : '—'} detail={`目标 ${String(event?.data.target_fps ?? dataset?.fps ?? '—')} FPS / 超时 ${String(event?.data.deadline_misses ?? 0)} 次`} />{errorDetails}</div>;
 }
 
 function SummaryItem({ label, value, detail }: { label: string; value: string; detail: string }) {
