@@ -8,6 +8,7 @@
     "cuda": "12.6",
     "cudnn": "90501",
     "pytorch": "2.7.1+cu126",
+    "torchvision": "0.22.1+cu126",
     "transformers": "5.3.0",
     "triton": "3.3.1",
     "precision": "float32",

@@ -180,7 +180,7 @@ export function DatasetViewerPage({ runtimeEvent, robotType }: { runtimeEvent: R
           const openDataset = () => { if (!dataset.available) return; setDetail(null); setEpisode(null); setSelectedId(dataset.id); };
           const unavailable = !dataset.available;
           return <div className={`dataset-management-row${unavailable ? ' unavailable' : ''}`} role={unavailable ? undefined : 'button'} aria-disabled={unavailable || undefined} tabIndex={unavailable ? -1 : 0} onClick={openDataset} onKeyDown={(event) => { if (!unavailable && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openDataset(); } }} key={dataset.id}>
-            <span><strong>{dataset.id}</strong><small>{dataset.status === 'unreadable' ? '不可读取' : `${dataset.tasks[0] || '未记录任务'} · ${dataset.recorded_on || '日期未知'}`}</small></span>
+            <span><strong>{dataset.id}</strong><small>{dataset.status === 'unreadable' ? '不可读取' : `${dataset.tasks[0] || '未记录任务'} / ${dataset.recorded_on || '日期未知'}`}</small></span>
             <span>{countLabel(dataset.episodes)}</span>
             <span>{durationLabel(dataset.duration_s)}</span>
             <span>{countLabel(dataset.frames)}</span>
@@ -205,7 +205,7 @@ export function DatasetViewerPage({ runtimeEvent, robotType }: { runtimeEvent: R
           {!detail && <div className="dataset-placeholder">正在加载数据集</div>}
           {detail && <>
             <section className="dataset-overview">
-              <div><span>任务</span><p>{detail.tasks.join(' · ') || '未记录任务描述'}</p></div>
+              <div><span>任务</span><p>{detail.tasks.join(' / ') || '未记录任务描述'}</p></div>
               <div className="dataset-overview-metrics">
                 <Metric label="Episodes" value={countLabel(detail.episodes.length)} />
                 <Metric label="总帧数" value={countLabel(detail.frames)} />
@@ -215,8 +215,8 @@ export function DatasetViewerPage({ runtimeEvent, robotType }: { runtimeEvent: R
             </section>
 
             <section className="episode-toolbar">
-              <label>Episode<select value={episodeIndex} onChange={(item) => setEpisodeIndex(Number(item.target.value))}>{detail.episodes.map((item) => <option value={item.episode_index} key={item.episode_index}>Episode {item.episode_index} · {durationLabel(item.duration_s)}</option>)}</select></label>
-              <div className="episode-toolbar-meta">{detail.cameras.map((camera) => <span key={camera.key}>{camera.label}{camera.resolution ? ` · ${camera.resolution}` : ''}</span>)}</div>
+              <label>Episode<select value={episodeIndex} onChange={(item) => setEpisodeIndex(Number(item.target.value))}>{detail.episodes.map((item) => <option value={item.episode_index} key={item.episode_index}>Episode {item.episode_index} / {durationLabel(item.duration_s)}</option>)}</select></label>
+              <div className="episode-toolbar-meta">{detail.cameras.map((camera) => <span key={camera.key}>{camera.label}{camera.resolution ? ` / ${camera.resolution}` : ''}</span>)}</div>
               <div className="episode-toolbar-actions"><button className={replaying && activeReplayId === detail.id ? 'danger' : 'primary'} type="button" disabled={replayPending || runningOther || (replaying && activeReplayId !== detail.id) || detail.robot_type !== robotType} onClick={() => replaying && activeReplayId === detail.id ? void stopReplay() : void startReplay(detail.id, episodeIndex)}>{replaying && activeReplayId === detail.id ? '停止回放' : detail.robot_type === robotType ? '回放此 Episode' : '设备类型不兼容'}</button></div>
             </section>
 
@@ -284,7 +284,7 @@ function EpisodePlayer({ episode }: { episode: EpisodePayload }) {
   }, [episode, playing, rate, seek]);
 
   return <div className="episode-player">
-    {episode.tasks[0] && <div className="episode-task"><span>任务描述</span><strong>{episode.tasks.join(' · ')}</strong></div>}
+    {episode.tasks[0] && <div className="episode-task"><span>任务描述</span><strong>{episode.tasks.join(' / ')}</strong></div>}
     {playbackError && <div className="error compact">{playbackError}</div>}
     <div className="camera-grid">
       {episode.videos.map((video, index) => <figure key={video.key}><video ref={(element) => { videoRefs.current[index] = element; }} src={video.url} preload="metadata" playsInline onLoadedMetadata={(event) => { event.currentTarget.currentTime = video.from_timestamp; }} /><figcaption><strong>{video.label}</strong><span>{durationLabel(episode.duration_s)}</span></figcaption></figure>)}
@@ -333,7 +333,7 @@ function TrajectoryChart({ episode, currentTime, hidden, onHiddenChange, onSeek 
         <line className="trajectory-cursor" x1={cursorX} y1="12" x2={cursorX} y2="80" vectorEffect="non-scaling-stroke" />
       </svg>
     </button>
-    <div className="trajectory-legend">{episode.series.map((series, index) => <label className={hidden.has(index) ? 'hidden' : ''} key={`${series.label}-${index}`}><input type="checkbox" checked={!hidden.has(index)} onChange={() => toggle(index)} style={{ accentColor: COLORS[index % COLORS.length] }} /><i style={{ background: COLORS[index % COLORS.length] }} /><strong>{series.label}</strong><span>实线 action · 虚线 state</span></label>)}</div>
+    <div className="trajectory-legend">{episode.series.map((series, index) => <label className={hidden.has(index) ? 'hidden' : ''} key={`${series.label}-${index}`}><input type="checkbox" checked={!hidden.has(index)} onChange={() => toggle(index)} style={{ accentColor: COLORS[index % COLORS.length] }} /><i style={{ background: COLORS[index % COLORS.length] }} /><strong>{series.label}</strong><span>实线 action / 虚线 state</span></label>)}</div>
   </section>;
 }
 

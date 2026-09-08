@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 RUNTIME_MANIFEST_NAME = "evomind-runtime.json"
 _VERSION_PACKAGES = {
     "pytorch": "torch",
+    "torchvision": "torchvision",
     "jax": "jax",
     "jaxlib": "jaxlib",
     "transformers": "transformers",
@@ -47,6 +48,7 @@ class TrainingEnvironment(BaseModel):
     cuda: str | None = None
     cudnn: str | None = None
     pytorch: str | None = None
+    torchvision: str | None = None
     jax: str | None = None
     jaxlib: str | None = None
     transformers: str | None = None
@@ -202,6 +204,7 @@ def capture_training_environment(
         cuda=cuda,
         cudnn=cudnn,
         pytorch=installed["pytorch"],
+        torchvision=installed["torchvision"],
         jax=installed["jax"],
         jaxlib=installed["jaxlib"],
         transformers=installed["transformers"],
@@ -387,7 +390,7 @@ def validate_active_runtime(checkpoint: Path) -> PolicyRuntimeManifest | None:
     issues: list[str] = []
     if _major_minor(actual.python) != _major_minor(manifest.training.python):
         issues.append(f"Python {actual.python} != {manifest.training.python}")
-    for field in ("pytorch", "cuda", "cudnn", "transformers", "triton"):
+    for field in ("pytorch", "torchvision", "cuda", "cudnn", "transformers", "triton"):
         expected = getattr(manifest.training, field)
         observed = getattr(actual, field)
         if expected and observed != expected:

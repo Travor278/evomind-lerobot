@@ -83,6 +83,7 @@ type LocalDataset = { id: string; path: string; episodes: number; frames: number
 type RuntimeTrainingEnvironment = {
   source?: 'training_capture' | 'checkpoint_metadata' | 'validated_inference'; captured_at?: string | null;
   python: string; cuda: string | null; cudnn: string | null; pytorch: string | null;
+  torchvision?: string | null;
   jax: string | null; jaxlib: string | null; transformers: string | null; triton: string | null;
   precision?: string | null; use_amp?: boolean | null; attention_backend?: string | null;
   torch_compile?: boolean | null; torch_compile_mode?: string | null; settings_source?: string | null;
