@@ -16,7 +16,13 @@ type CollectionTask = {
   duration_s: number; ring_buffer_seconds: number;
 };
 type PolicyStrategy = 'episodic' | 'sentry' | 'highlight' | 'dagger_corrections' | 'dagger_continuous' | 'episodic_dagger';
-type LocalPolicy = { id: string; path: string; type: string };
+type InferenceBackend = 'sync' | 'rtc';
+type LocalPolicy = {
+  id: string;
+  path: string;
+  type: string;
+  runtime?: { manifest?: { inference?: { rollout_backend?: InferenceBackend } } };
+};
 type TrendItem = { date: string; target_duration_s: number; actual_duration_s: number; episode_count: number };
 type ActiveSession = {
   id: string; task_name: string; dataset_name: string; repo_id: string | null; work_date: string;
@@ -51,6 +57,10 @@ const policyStrategies: Record<PolicyStrategy, { label: string; detail: string }
 
 function shanghaiDate() {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date());
+}
+
+function policyInferenceBackend(policies: LocalPolicy[], policyPath: string): InferenceBackend {
+  return policies.find((policy) => policy.path === policyPath)?.runtime?.manifest?.inference?.rollout_backend ?? 'sync';
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -163,7 +173,7 @@ export function CollectionProgressPage({ runtimeEvent, policies }: { runtimeEven
   const [collectionMethod, setCollectionMethod] = useState<'manual' | 'policy'>('manual');
   const [policyPath, setPolicyPath] = useState(policies[0]?.path ?? '');
   const [strategy, setStrategy] = useState<PolicyStrategy>('episodic_dagger');
-  const [inference, setInference] = useState<'sync' | 'rtc'>('sync');
+  const [inference, setInference] = useState<InferenceBackend>(() => policyInferenceBackend(policies, policies[0]?.path ?? ''));
   const [duration, setDuration] = useState(120);
   const [ringBufferSeconds, setRingBufferSeconds] = useState(10);
 
@@ -181,6 +191,15 @@ export function CollectionProgressPage({ runtimeEvent, policies }: { runtimeEven
     return () => window.clearTimeout(timer);
   }, [refresh]);
   useEffect(() => {
+    if (editingId || policies.length === 0 || policies.some((policy) => policy.path === policyPath)) return;
+    const defaultPolicy = policies[0];
+    const timer = window.setTimeout(() => {
+      setPolicyPath(defaultPolicy.path);
+      setInference(policyInferenceBackend(policies, defaultPolicy.path));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [editingId, policies, policyPath]);
+  useEffect(() => {
     if (!runtimeEvent || !['recording', 'rollout'].includes(runtimeEvent.operation)) return undefined;
     const timer = window.setTimeout(() => void refresh(), 0);
     return () => window.clearTimeout(timer);
@@ -194,8 +213,9 @@ export function CollectionProgressPage({ runtimeEvent, policies }: { runtimeEven
   const resetForm = () => {
     setEditingId(null); setName(''); setDescription(''); setTargetMinutes(60);
     setNumEpisodes(20); setEpisodeTime(30); setResetTime(10); setFps(30);
-    setCollectionMethod('manual'); setPolicyPath(policies[0]?.path ?? '');
-    setStrategy('episodic_dagger'); setInference('sync'); setDuration(120); setRingBufferSeconds(10);
+    const defaultPolicyPath = policies[0]?.path ?? '';
+    setCollectionMethod('manual'); setPolicyPath(defaultPolicyPath);
+    setStrategy('episodic_dagger'); setInference(policyInferenceBackend(policies, defaultPolicyPath)); setDuration(120); setRingBufferSeconds(10);
   };
 
   async function saveTask() {
@@ -309,9 +329,9 @@ export function CollectionProgressPage({ runtimeEvent, policies }: { runtimeEven
         <label>任务名称<input value={name} onChange={(item) => setName(item.target.value)} disabled={editingBlocked} placeholder="例如：积木入盒" /></label>
         <label>目标时长（分钟）<TaskNumberInput value={targetMinutes} onCommit={setTargetMinutes} min={1} max={10_080} disabled={editingBlocked} /></label>
         <label className="full-field">任务描述<textarea value={description} onChange={(item) => setDescription(item.target.value)} disabled={editingBlocked} placeholder="写入 LeRobot 数据集的完整任务描述" /></label>
-        <label className="full-field">采集方式<select value={collectionMethod} onChange={(item) => setCollectionMethod(item.target.value as 'manual' | 'policy')} disabled={editingBlocked || Boolean(editingTask?.locked)}><option value="manual">人工采集</option><option value="policy">Policy 采集</option></select>{editingTask?.locked && <small>已有采集记录后，采集方式保持不变</small>}</label>
+        <label className="full-field">采集方式<select value={collectionMethod} onChange={(item) => { const method = item.target.value as 'manual' | 'policy'; setCollectionMethod(method); if (method === 'policy') setInference(policyInferenceBackend(policies, policyPath)); }} disabled={editingBlocked || Boolean(editingTask?.locked)}><option value="manual">人工采集</option><option value="policy">Policy 采集</option></select>{editingTask?.locked && <small>已有采集记录后，采集方式保持不变</small>}</label>
         <div className="full-field task-settings-label">采集设置</div>
-        {collectionMethod === 'policy' && <><label className="full-field">本地 Policy<select value={policyPath} onChange={(item) => setPolicyPath(item.target.value)} disabled={editingBlocked}>{policies.length === 0 && <option value="">本机未发现模型</option>}{policies.map((policy) => <option value={policy.path} key={policy.path}>{policy.id} / {policy.type}</option>)}</select></label><label>采集策略<input value={policyStrategies[strategy].label} readOnly /></label><label>推理后端<select value={inference} onChange={(item) => setInference(item.target.value as 'sync' | 'rtc')} disabled={editingBlocked}><option value="sync">同步推理</option><option value="rtc">RTC 实时分块</option></select></label></>}
+        {collectionMethod === 'policy' && <><label className="full-field">本地 Policy<select value={policyPath} onChange={(item) => { const path = item.target.value; setPolicyPath(path); setInference(policyInferenceBackend(policies, path)); }} disabled={editingBlocked}>{policies.length === 0 && <option value="">本机未发现模型</option>}{policies.map((policy) => <option value={policy.path} key={policy.path}>{policy.id} / {policy.type}</option>)}</select></label><label>采集策略<input value={policyStrategies[strategy].label} readOnly /></label><label>推理后端<select value={inference} onChange={(item) => setInference(item.target.value as InferenceBackend)} disabled={editingBlocked}><option value="sync">同步推理</option><option value="rtc">RTC 实时分块</option></select></label></>}
         {(collectionMethod === 'manual' || strategy === 'episodic' || strategy === 'dagger_corrections' || strategy === 'episodic_dagger') && <label>采集轮数<TaskNumberInput value={numEpisodes} onCommit={setNumEpisodes} min={1} max={10_000} disabled={editingBlocked} /></label>}
         {(collectionMethod === 'manual' || strategy === 'episodic' || strategy === 'episodic_dagger') && <label>单轮时长（秒）<TaskNumberInput value={episodeTime} onCommit={setEpisodeTime} min={1} max={86_400} disabled={editingBlocked} /></label>}
         {(collectionMethod === 'manual' || strategy === 'episodic' || strategy === 'episodic_dagger') && <label>重置时间（秒）<TaskNumberInput value={resetTime} onCommit={setResetTime} min={0} max={86_400} disabled={editingBlocked} /></label>}
