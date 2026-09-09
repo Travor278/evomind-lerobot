@@ -82,6 +82,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
 
                     if should_reset:
                         self._prepare_teleop_reset(ctx, last_action)
+                        if self._stop_requested(ctx):
+                            break
                         self._emit_reset_phase(recorded_episodes + 1, dataset_cfg.num_episodes)
                         self._run_reset(
                             ctx,
@@ -161,6 +163,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
             if transition is not None:
                 old_phase, new_phase = transition
                 self._apply_transition(old_phase, new_phase, engine, interpolator, ctx, last_action)
+                if self._stop_requested(ctx):
+                    return "stopped", last_action
                 self._emit_episode_phase(self._events.phase, episode, total_episodes)
                 if new_phase == DAggerPhase.AUTONOMOUS:
                     last_action = None
@@ -234,6 +238,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
         last_action: dict[str, Any] | None,
     ) -> None:
         """Enter human control using the same smooth handover as DAgger."""
+        if self._stop_requested(ctx):
+            return
         phase = self._events.phase
         if phase == DAggerPhase.AUTONOMOUS:
             self._apply_transition(
@@ -246,6 +252,8 @@ class EpisodicDAggerStrategy(DAggerStrategy):
             )
             self._events.phase = DAggerPhase.PAUSED
             phase = DAggerPhase.PAUSED
+        if self._stop_requested(ctx):
+            return
         if phase == DAggerPhase.PAUSED:
             self._apply_transition(
                 DAggerPhase.PAUSED,

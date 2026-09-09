@@ -18,7 +18,7 @@ def test_pedal_listener_closes_device_and_stops(monkeypatch):
 
     device = MagicMock()
     device.name = "Test FootSwitch"
-    pending = [SimpleNamespace(type=1, value=1, keycode="KEY_A")]
+    pending = [SimpleNamespace(type=1, code=30, value=1, keycode="KEY_A")]
     received = threading.Event()
     monkeypatch.setitem(
         sys.modules,
@@ -53,12 +53,14 @@ def test_pedal_permission_failure_is_structured(monkeypatch):
     def denied(_):
         raise PermissionError("permission denied")
 
-    monkeypatch.setitem(sys.modules, "evdev", SimpleNamespace(InputDevice=denied))
+    monkeypatch.setitem(sys.modules, "evdev", SimpleNamespace(
+        InputDevice=denied, categorize=lambda event: event, ecodes=SimpleNamespace(EV_KEY=1)
+    ))
     listener = module.start_pedal_listener(lambda _: None, "/dev/input/fake-pedal")
-    assert listener.status["state"] == "unavailable"
+    assert listener.status["state"] == "reconnecting"
     assert "permission denied" in listener.status["error"]
-    assert not listener.is_alive()
     listener.stop()
+    assert not listener.is_alive()
 
 
 def test_web_bridge_does_not_disable_the_pedal(monkeypatch):

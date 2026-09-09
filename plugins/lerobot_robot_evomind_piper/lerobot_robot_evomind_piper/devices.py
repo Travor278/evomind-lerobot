@@ -33,6 +33,7 @@ from .common import (
     unit_to_milli,
     wait_enable_piper,
 )
+from .handover import enable_with_position_hold, wait_fresh_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -396,22 +397,33 @@ class PiperXLeader(Teleoperator):
         else:
             self._manual_action = None
             set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-            # Master/slave role changes are asynchronous on Piper. Wait for the
-            # controller to start follower feedback before enabling it.
-            time.sleep(max(0.5, self.config.startup_sleep_s))
-            if not wait_enable_piper(self.arm, self.config.enable_timeout_s):
-                try:
+            try:
+                # Role changes are asynchronous. A fixed sleep cannot prove that
+                # the SDK cache describes the leader's current physical pose.
+                hold_action = self._wait_for_feedback_action()
+                if hold_action is None:
+                    raise RuntimeError(f"[{self.config.port}] no fresh Piper feedback before leader enable")
+                self._send_command_mode()
+
+                def hold_current_position() -> None:
+                    self.arm.JointCtrl(
+                        *(unit_to_milli(hold_action[key]) for key in PIPER_JOINT_ACTION_KEYS)
+                    )
+                    if self.config.sync_gripper:
+                        self._send_gripper_ctrl(unit_to_milli(hold_action["gripper.pos"]), enabled=True)
+
+                logger.info("[%s] Piper handover: seeding current-pose hold before enable", self.config.port)
+                if not enable_with_position_hold(self.arm, hold_current_position, self.config.enable_timeout_s):
+                    raise RuntimeError(
+                        f"[{self.config.port}] Piper leader enable feedback did not advance and confirm "
+                        f"all motors within {self.config.enable_timeout_s:.1f} seconds"
+                    )
+                logger.info("[%s] Piper handover: position hold enabled; ready for alignment", self.config.port)
+            except Exception:
+                with suppress(Exception):
                     set_piper_role(self.arm, PIPER_ROLE_LEADER)
-                finally:
-                    self._manual_control_enabled = None
-                raise RuntimeError(
-                    f"[{self.config.port}] Piper leader did not enable within "
-                    f"{self.config.enable_timeout_s:.1f} seconds after switching to follower role."
-                )
-            set_piper_role(self.arm, PIPER_ROLE_FOLLOWER)
-            self._send_command_mode()
-            if self.config.sync_gripper:
-                self._set_gripper_enabled(True)
+                self._manual_control_enabled = None
+                raise
         self._manual_control_enabled = enabled
 
     def enable_torque(self) -> None:
@@ -441,16 +453,9 @@ class PiperXLeader(Teleoperator):
         return abs(milli_to_unit(message.gripper_state.grippers_angle))
 
     def _wait_for_feedback_action(self) -> RobotAction | None:
-        deadline = time.monotonic() + self.config.enable_timeout_s
-        while True:
-            action = self._read_joint_from_feedback()
-            gripper_pos = self._read_gripper_from_feedback() if self.config.sync_gripper else 0.0
-            if action is not None and gripper_pos is not None:
-                action["gripper.pos"] = gripper_pos
-                return action
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.01)
+        return wait_fresh_feedback(
+            self.arm, self.config.enable_timeout_s, sync_gripper=self.config.sync_gripper
+        )
 
     def _read_manual_action(self) -> RobotAction:
         if self._manual_action is None:

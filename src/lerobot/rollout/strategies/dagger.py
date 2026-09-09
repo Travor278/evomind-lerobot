@@ -151,7 +151,7 @@ class DAggerEvents:
         from the current phase, preventing impossible state changes.
         """
         with self._lock:
-            if self.transitioning.is_set():
+            if self.transitioning.is_set() or self.stop_recording.is_set():
                 return
             if (self._phase, event) in _DAGGER_TRANSITIONS:
                 self._pending_transition = event
@@ -159,6 +159,9 @@ class DAggerEvents:
     def consume_transition(self) -> tuple[DAggerPhase, DAggerPhase] | None:
         """Consume a pending transition (called from main loop)."""
         with self._lock:
+            if self.stop_recording.is_set():
+                self._pending_transition = None
+                return None
             if self._pending_transition is None:
                 return None
             key = (self._phase, self._pending_transition)
@@ -358,6 +361,7 @@ class DAggerStrategy(RolloutStrategy):
             self._listener.stop()
         if self._pedal_thread is not None:
             self._pedal_thread.stop()
+            self._pedal_thread = None
 
         # Flush any queued/running push cleanly
         if self._push_executor is not None:
@@ -380,7 +384,9 @@ class DAggerStrategy(RolloutStrategy):
 
         self._teardown_hardware(
             ctx.hardware,
-            return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
+            return_to_initial_position=(
+                ctx.runtime.cfg.return_to_initial_position and not self._stop_requested(ctx)
+            ),
         )
         logger.info("DAgger strategy teardown complete")
 
@@ -702,6 +708,10 @@ class DAggerStrategy(RolloutStrategy):
     # State-machine transition side-effects
     # ------------------------------------------------------------------
 
+    def _stop_requested(self, ctx) -> bool:
+        shutdown = getattr(getattr(ctx, "runtime", None), "shutdown_event", None)
+        return self._events.stop_recording.is_set() or (shutdown is not None and shutdown.is_set())
+
     def _apply_transition(
         self,
         old_phase,
@@ -711,10 +721,19 @@ class DAggerStrategy(RolloutStrategy):
         ctx,
         prev_action,
     ) -> None:
-        self._events.transitioning.set()
+        if self._stop_requested(ctx):
+            engine.pause()
+            self._events.phase = DAggerPhase.PAUSED
+            return
+        with self._events._lock:
+            self._events.transitioning.set()
+            self._events._pending_transition = None
         try:
             self._perform_transition(old_phase, new_phase, engine, interpolator, ctx, prev_action)
         finally:
+            if self._stop_requested(ctx):
+                engine.pause()
+                self._events.phase = DAggerPhase.PAUSED
             self._events.transitioning.clear()
 
     def _perform_transition(
@@ -801,7 +820,7 @@ class DAggerStrategy(RolloutStrategy):
 
             # unlock the teleop for human control
             if teleop_supports_feedback(teleop):
-                teleop.disable_torque()
+                self._release_teleop_for_handover(teleop, engine)
 
         elif old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
             if teleop_supports_feedback(teleop):
@@ -816,7 +835,18 @@ class DAggerStrategy(RolloutStrategy):
 
             # release teleop before resuming the policy
             if teleop_supports_feedback(teleop):
-                teleop.disable_torque()
+                self._release_teleop_for_handover(teleop, engine)
+
+    def _release_teleop_for_handover(self, teleop, engine) -> None:
+        try:
+            teleop.disable_torque()
+        except Exception as error:
+            # A feedback/mode failure must not turn an intervention into a
+            # terminated episode. The loop remains paused and keeps its data.
+            engine.pause()
+            self._events.phase = DAggerPhase.PAUSED
+            self._handover_error = str(error) or type(error).__name__
+            logger.exception("Manual handover failed; remaining paused and retaining the episode")
 
     # ------------------------------------------------------------------
     # Background push (shared by both modes)

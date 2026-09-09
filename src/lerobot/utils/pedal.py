@@ -55,10 +55,10 @@ class PedalPressFilter:
 
     def __init__(self, debounce_s: float = 0.25):
         self.debounce_s = debounce_s
-        self.held: set[str] = set()
+        self.held: set[str | int] = set()
         self.last_press = float("-inf")
 
-    def accept(self, code: str, value: int, now: float) -> bool:
+    def accept(self, code: str | int, value: int, now: float) -> bool:
         if value == 0:
             self.held.discard(code)
             return False
@@ -95,33 +95,67 @@ class PedalListener(threading.Thread):
     def run(self) -> None:
         from evdev import categorize, ecodes
 
-        press_filter = PedalPressFilter()
         try:
             while not self.stop_event.is_set():
-                if not select.select([self.device], [], [], 0.1)[0]:
-                    continue
                 try:
-                    events = list(self.device.read())
-                except BlockingIOError:
-                    continue
-                for event in events:
-                    if self.stop_event.is_set():
+                    if self.device is None:
+                        self._connect()
+                    press_filter = PedalPressFilter()
+                    # A held pedal at connect/reconnect is not a new press.
+                    press_filter.held.update(self.device.active_keys())
+                    while not self.stop_event.is_set():
+                        if not select.select([self.device], [], [], 0.1)[0]:
+                            continue
+                        try:
+                            events = list(self.device.read())
+                        except BlockingIOError:
+                            continue
+                        for event in events:
+                            if self.stop_event.is_set():
+                                break
+                            if event.type != ecodes.EV_KEY:
+                                continue
+                            key = categorize(event)
+                            code = key.keycode
+                            if isinstance(code, list | tuple):
+                                code = code[0]
+                            # Filter numeric IDs so active_keys() uses the same identity.
+                            if press_filter.accept(event.code, event.value, time.monotonic()):
+                                try:
+                                    self.on_press(code)
+                                except Exception:
+                                    logger.exception("Pedal callback failed")
+                except (OSError, ValueError) as error:
+                    self.set_status("reconnecting", error=str(error))
+                    logger.warning("Pedal reconnecting (%s): %s", self.device_path, error)
+                    self._close()
+                    if self.stop_event.wait(0.5):
                         break
-                    if event.type != ecodes.EV_KEY:
-                        continue
-                    key = categorize(event)
-                    code = key.keycode
-                    if isinstance(code, list | tuple):
-                        code = code[0]
-                    if press_filter.accept(code, event.value, time.monotonic()):
-                        self.on_press(code)
-        except Exception as error:
-            self.set_status("disconnected", error=str(error))
-            logger.warning("Pedal disconnected: %s", error)
         finally:
-            self.device.close()
+            self._close()
             if self.stop_event.is_set():
                 self.set_status("stopped")
+
+    def _connect(self) -> None:
+        from evdev import InputDevice
+
+        self.device = InputDevice(self.device_path)
+        try:
+            # Preserve exclusive capture: a space-emulating pedal must not also
+            # activate the browser's currently focused button.
+            self.device.grab()
+        except OSError:
+            self._close()
+            raise
+        self.set_status("connected", name=self.device.name)
+        logger.info("Pedal connected: %s (%s)", self.device.name, self.device_path)
+
+    def _close(self) -> None:
+        if self.device is not None:
+            try:
+                self.device.close()
+            finally:
+                self.device = None
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -150,23 +184,18 @@ def start_pedal_listener(
 
     Returns
     -------
-    A stoppable daemon listener. If the optional evdev dependency or device
-    is unavailable, its status explains the failure and no thread is started.
+    A stoppable daemon listener. Device failures retry the configured path.
+    A missing evdev dependency is reported without starting a thread.
     """
     listener = PedalListener(on_press, device_path)
     try:
-        from evdev import InputDevice
-
-        listener.device = InputDevice(device_path)
-        # A pedal often emulates an arrow/space key. Exclusive input prevents
-        # the keyboard listener from also consuming the same physical press.
-        listener.device.grab()
-        listener.set_status("connected", name=listener.device.name)
-    except (ImportError, OSError) as error:
-        if listener.device is not None:
-            listener.device.close()
+        listener._connect()
+    except ImportError as error:
         listener.set_status("unavailable", error=str(error))
         logger.warning("Pedal unavailable (%s): %s", device_path, error)
         return listener
+    except OSError as error:
+        listener.set_status("reconnecting", error=str(error))
+        logger.warning("Pedal reconnecting (%s): %s", device_path, error)
     listener.start()
     return listener
